@@ -1,0 +1,17 @@
+name: epl_mw_naive
+market: match_winner
+league: E0
+seasons: ["1819", "1920", "2021", "2122", "2223", "2324", "2425", "2526"]
+model:
+  type: naive_frequency
+  params: {}
+staking:
+  ev_threshold: 0.05
+  kelly_fraction: 0.25
+  max_stake_frac: 0.05
+bankroll:
+  starting: 1000.0
+  max_drawdown: 0.3
+  stop_on_breach: true
+backtest:
+  min_train_days: 60
