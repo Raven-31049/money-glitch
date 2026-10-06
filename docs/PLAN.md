@@ -37,42 +37,50 @@ Summarised here for convenience; `AGENTS.md` is authoritative.
 
 ## 3. Repository layout
 
+### Built — Phase 0 scaffold
+
 ```
 src/bet_engine/
-  config.py            # pydantic settings; paths, thresholds, league registry
+  __init__.py
+  config.py            # run settings, thresholds, league registry (stub only)
+  db.py                # SQLite connection, schema, migrations
   data/
-    schema.sql         # SQLite DDL, versioned
-    store.py           # connection handling, migrations, upserts
-    providers/         # one module per odds/result source
-    calendar.py        # calendar-day boundaries, league timezones
-  models/
-    base.py            # Model protocol; predict(frame) -> PredictionBatch
-    registry.py
-  probability/
-    devig.py           # margin removal methods
-    uncertainty.py     # percentile vectors, joint samplers
-    sampling.py        # vectorised scenario grids
+    ingest.py          # provider client, raw landing, normalization
   markets/
-    base.py            # Market protocol (outcomes, settlement, tick size)
-    moneyline.py
-    spread.py
-    totals.py
-  ev/
-    expected_value.py
-    kelly.py           # fractional Kelly, caps
-    filters.py         # edge thresholds, liquidity, staleness
-  validation/
+    base.py            # market contract: outcomes, settlement, tick size, de-vig
+    match_winner.py    # three-way home/draw/away — first market
+  models/
+    base.py            # model contract; one per league; provenance + percentiles
+  backtest/
     walkforward.py     # calendar-day fold engine + temporal assertion
-    backtest.py        # stop_on_breach handling
-    bankroll.py
-    bootstrap.py       # block bootstrap over days
+    staking.py         # edge threshold, fractional Kelly, per-bet caps
+    bankroll.py        # bankroll, drawdown, stop_on_breach handling
+  eval/
+    bootstrap.py       # day-block bootstrap on the full bet sequence
     calibration.py     # Brier, log loss, reliability bins, ECE
-    controls.py        # pure-market and other control variants
-    report.py
-  cli.py
-tests/
+    report.py          # both breach modes, significance, sample-size warning
+tests/                 # pytest
+configs/               # YAML variant configs
+data/raw/              # gitignored payloads (.gitkeep tracked)
+data/processed/        # gitignored payloads (.gitkeep tracked)
+reports/               # gitignored output (.gitkeep tracked)
 docs/
 ```
+
+Modules are placeholders (docstring + TODO) until their phase. Nothing below
+exists yet; it is created when its phase starts, never before.
+
+### Added later, by phase
+
+| Phase | Module | Purpose |
+| ----- | ------ | ------- |
+| 1 | `data/calendar.py`, `data/providers/` | day boundaries per league timezone; one module per source |
+| 2 | `probability/` → `devig.py`, `uncertainty.py`, `sampling.py` | de-vig, percentile containers, vectorised samplers |
+| 4 | `ev/` → `expected_value.py`, `filters.py` | EV and bet filters; Kelly sizing stays in `backtest/staking.py` |
+| 5 | `eval/controls.py` | pure-market control harness |
+| 6 | `models/registry.py` | league → model lookup |
+| 7 | `cli.py` | entry points, config hashing |
+| 8 | `markets/spread.py`, `markets/totals.py` | expansion, one market at a time |
 
 ## 4. Data model (SQLite)
 
@@ -133,16 +141,22 @@ Each phase lists deliverables and exit criteria. Exit criteria are pass/fail. Do
 start the next phase until the current one is green.
 
 ### Phase 0 — Scaffolding (CURRENT)
-- `uv` installed, `pyproject.toml` with Python 3.11+, src layout, pytest config.
-- `src/bet_engine/` package skeleton with empty modules and docstrings.
-- `config.py` with pydantic settings.
-- `.gitignore`, lint/format config, `uv run pytest` green on an empty suite.
-- Exit: `uv run pytest` passes; `uv run python -c "import bet_engine"` works.
+Built:
+- `uv` installed (0.12.x), `pyproject.toml` with Python 3.11+, src layout, pytest config.
+- `src/bet_engine/` package skeleton — docstring + TODO modules, no logic.
+- `.gitignore` (Python + `data/` + `reports/`), tracked `.gitkeep` placeholders.
+- All declared dependencies installed; `uv.lock` committed.
+
+Remaining before exit criteria can be called complete:
+- `config.py` pydantic settings (still a stub — no logic was added at Phase 0).
+- lint/format config.
+
+Exit: `uv run pytest` passes; `uv run python -c "import bet_engine"` works.
 
 ### Phase 1 — Data layer
-- `schema.sql`, `store.py`, migrations, typed upserts.
-- Calendar-day utilities with league timezone handling.
-- One odds/result provider end to end, with snapshot timestamps.
+- `db.py`: schema, migrations, typed upserts.
+- `data/calendar.py` — calendar-day utilities with league timezone handling.
+- `data/providers/` — one odds/result provider end to end, with snapshot timestamps.
 - Exit: fixtures loaded for one league; `events`/`odds_snapshots` queryable;
   tests cover timezone boundaries on day rollover.
 
@@ -154,12 +168,13 @@ start the next phase until the current one is green.
 - Exit: unit tests for de-vig, sampler marginals, percentile invariants.
 
 ### Phase 3 — Market adapters
-- `markets/base.py` protocol; moneyline first.
+- `markets/base.py` contract; `markets/match_winner.py` first.
 - Settlement logic, tick sizes, de-vig wiring.
-- Exit: moneyline round-trips; a synthetic event settles correctly in tests.
+- Exit: match_winner round-trips; a synthetic event settles correctly in tests.
 
 ### Phase 4 — EV, Kelly, filters
-- `expected_value.py`, `kelly.py`, `filters.py`.
+- `ev/expected_value.py`, `ev/filters.py`; edge threshold, fractional Kelly and
+  caps in `backtest/staking.py`.
 - Exit: **pure market control places zero bets** in a test; edge and stake are
   correct on hand-computed fixtures.
 
@@ -207,5 +222,12 @@ Before declaring any phase done:
 
 ## 9. Change log
 
+- Phase 0 scaffold built (26 files). Section 3 rewritten to match the tree that
+  actually exists; stale names (`store.py`, `schema.sql`, `validation/`,
+  `moneyline.py`) replaced with `db.py`, `eval/` + `backtest/`, `match_winner.py`.
+  Future-only modules (`probability/`, `ev/`, `cli.py`, registry) are now listed as
+  phase-scoped additions instead of implying they already exist.
+- Phase 0 split into Built / Remaining: pydantic settings in `config.py` and the
+  lint/format config are not done — Phase 0 was scaffold-only, no logic.
 - Initial plan. Phase 0 scaffold only; no implementation beyond scaffolding until
   Phase 0 exit criteria pass.
