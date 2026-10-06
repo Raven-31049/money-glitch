@@ -1,0 +1,29 @@
+[project]
+name = "bet-engine"
+version = "0.1.0"
+description = "Betting analytics research system"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas",
+    "numpy",
+    "scipy",
+    "statsmodels",
+    "pydantic",
+    "pyyaml",
+    "requests",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bet_engine"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
