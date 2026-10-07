@@ -18,6 +18,7 @@ from .base import (
     check_predictions,
     supports_samples,
 )
+from .cards_poisson import CardsPoisson, LeagueAveragePoisson, add_card_features
 from .naive_frequency import NaiveFrequency
 from .pure_market import PureMarket, devig_long
 
@@ -26,6 +27,8 @@ from .pure_market import PureMarket, devig_long
 MODEL_REGISTRY: dict[str, type] = {
     "pure_market": PureMarket,
     "naive_frequency": NaiveFrequency,
+    "cards_poisson": CardsPoisson,
+    "cards_league_average": LeagueAveragePoisson,
 }
 
 
@@ -54,11 +57,14 @@ def create_model(
 
 __all__ = [
     "MODEL_REGISTRY",
+    "CardsPoisson",
+    "LeagueAveragePoisson",
     "MarketModel",
     "PREDICTION_COLUMNS",
     "NaiveFrequency",
     "PureMarket",
     "SamplingModel",
+    "add_card_features",
     "check_predictions",
     "create_model",
     "devig_long",

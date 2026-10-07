@@ -37,3 +37,16 @@ but a future refactor should follow redirects explicitly.
 - This is the mitigation for the E0 2526 Pinnacle gap above: those 170 rows
   are now *counted as skipped* under `pinnacle_only` instead of being silently
   priced off Bet365. The underlying data caveat still stands.
+
+## Cards totals - `total_cards` counting rule is provisional
+
+- **Checked:** 2026-10-07
+- Phase 1 settles a card total as `hy + ay + hr + ar` exactly as
+  football-data.co.uk publishes it (`markets/cards_totals.py`).
+- The bookmaker's own counting rule is **unconfirmed**: whether a second
+  yellow leading to a red counts once or twice, and whether cards shown to
+  coaching staff count at all. No odds source has been chosen yet (Phase 1
+  step 1 has no odds), so this cannot yet be checked against a real line.
+- Implication: every over/under probability in the Phase 1 step 1 report is
+  provisional. Re-check against the chosen source's line before any
+  comparison between model probabilities and market prices.

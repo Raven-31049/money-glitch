@@ -72,6 +72,15 @@ docs/
 Modules are placeholders (docstring + TODO) until their phase. Nothing below
 exists yet; it is created when its phase starts, never before.
 
+### Built — Phase 1 step 1 (cards, team-only)
+
+```
+src/bet_engine/
+  models/cards_poisson.py   # causal shrunk card rates, team Poisson, league-average control
+  markets/cards_totals.py   # hy+ay+hr+ar vs line settlement (not registered: no config `line` yet)
+scripts/phase1_step1_cards.py  # walk-forward calibration report — no odds, no bets
+```
+
 ### Added later, by phase
 
 | Phase | Module | Purpose |
@@ -228,6 +237,23 @@ Before declaring any phase done:
 
 ## 9. Change log
 
+- Phase 1 step 1 — team-only cards model. `models/cards_poisson.py` builds
+  per-team rates shrunk toward the league mean *strictly before each date*
+  (weight `k`, a config param), and enforces causality at runtime:
+  `assert_features_are_causal` perturbs a probe date's card counts and refuses
+  any feature function whose output moves on or before that date — tested
+  against two deliberately broken functions (same-day self-read, final-matchday
+  read). `CardsPoisson` fits a Poisson GLM on team-match rows (log own rate,
+  log opponent rate, home flag) and reports over/under lines off the summed
+  expectation; `LeagueAveragePoisson` is the same regression minus the rate
+  columns — the control that isolates team information. Registered as
+  `cards_poisson` / `cards_league_average`. Settlement lives in
+  `markets/cards_totals.py`, unregistered because a config has no `line` field
+  until an odds source lands (the counting rule is provisional — DATA_NOTES).
+  `scripts/phase1_step1_cards.py` runs the walk-forward 12 times (2 datasets ×
+  2 models × 3 lines) and writes `reports/phase1_step1_cards_*.md`: Brier, log
+  loss, 10-bin reliability tables, widest-bin gap, and dispersion, with and
+  without `covid_affected`. 55 new tests.
 - Phase 0 gate fixes. §5: EV is now defined on the raw odds actually paid
   (`model_prob * raw_odds - 1`); de-vigged odds only produce the market
   probability (control prediction and reporting). §5 Bootstrap corrected to

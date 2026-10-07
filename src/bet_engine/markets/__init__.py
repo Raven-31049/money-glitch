@@ -20,8 +20,11 @@ from .base import (
     sources_for_policy,
     validate_sources,
 )
+from .cards_totals import CardsTotals
 from .match_winner import MATCH_WINNER, MatchWinner
 
+#: Markets a config can name. CardsTotals is deliberately absent: its identity
+#: includes a line, and no config field carries one yet (see cards_totals.py).
 REGISTRY: dict[str, Market] = {MATCH_WINNER.name: MATCH_WINNER}
 
 
@@ -40,6 +43,7 @@ __all__ = [
     "ODDS_POLICIES",
     "POLICY_BOOKMAKERS",
     "BaseMarket",
+    "CardsTotals",
     "MATCH_WINNER",
     "Market",
     "MatchWinner",
