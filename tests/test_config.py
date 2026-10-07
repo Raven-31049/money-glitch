@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-import yaml
+import pytest  # pyright: ignore[reportMissingImports]
+import yaml  # pyright: ignore[reportMissingModuleSource]
 
-from bet_engine.config import VariantConfig, load_all, load_variant
+from bet_engine.config import VariantConfig, load_all, load_variant  # pyright: ignore[reportMissingImports]
 
 TESTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TESTS_DIR.parent
@@ -67,6 +67,7 @@ def test_load_variant_parses_all_fields(tmp_path):
     assert config.market == "match_winner"
     assert config.league == "E0"
     assert config.seasons == ["1819", "1920"]
+    assert config.odds_policy == "pinnacle_only"
     assert config.model.type == "naive_frequency"
     assert config.model.params == {"k": 2}
     assert config.staking.ev_threshold == 0.05
@@ -89,8 +90,15 @@ def test_defaults_when_omitted(tmp_path):
     loaded = load_variant(path)
 
     assert loaded.uncertainty_percentile is None
+    assert loaded.odds_policy == "pinnacle_only"
     assert loaded.backtest.refit_every_days == 1
     assert loaded.bankroll.stop_on_breach is False
+
+
+def test_fallback_odds_policy_is_accepted(tmp_path):
+    path = _write(tmp_path, "v.yaml", valid_config(odds_policy="fallback"))
+
+    assert load_variant(path).odds_policy == "fallback"
 
 
 def test_unquoted_season_numbers_are_coerced(tmp_path):
@@ -169,6 +177,8 @@ def test_missing_section_reports_locations(tmp_path):
         ({"market": ""}, "must not be blank"),
         ({"name": "   "}, "must not be blank"),
         ({"model": {"type": "   "}}, "model.type"),
+        ({"odds_policy": "pinnacle"}, "odds_policy must be one of"),
+        ({"odds_policy": ""}, "odds_policy must be one of"),
     ],
     ids=[
         "kelly_fraction_zero",
@@ -188,6 +198,8 @@ def test_missing_section_reports_locations(tmp_path):
         "market_blank",
         "name_blank",
         "model_type_blank",
+        "odds_policy_unknown",
+        "odds_policy_blank",
     ],
 )
 def test_validation_failures(tmp_path, override, match):
@@ -205,3 +217,16 @@ def test_example_configs_load():
         assert loaded[name].league == "E0"
         assert loaded[name].market == "match_winner"
         assert loaded[name].bankroll.starting > 0
+
+
+def test_example_configs_state_their_odds_policy_explicitly():
+    """Checked in the YAML, not just via the default: a report reader must be
+    able to see the policy in the config file the run quotes."""
+    paths = sorted(CONFIGS_DIR.glob("*.yaml")) + sorted(CONFIGS_DIR.glob("*.yml"))
+    assert paths, "no example configs found"
+
+    for path in paths:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert raw.get("odds_policy") == "pinnacle_only", (
+            f"{path} must state odds_policy: pinnacle_only"
+        )

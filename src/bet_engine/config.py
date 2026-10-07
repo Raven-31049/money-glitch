@@ -16,6 +16,8 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from .markets.base import DEFAULT_ODDS_POLICY, ODDS_POLICIES
+
 # Season codes are football-data style four-character codes ("1819" = 2019-20).
 _YEAR_CODE = re.compile(r"^\d{4}$")
 
@@ -106,6 +108,25 @@ class BacktestConfig(_Base):
         return self
 
 
+class BootstrapConfig(_Base):
+    """Significance resampling: draw count and the seed that reproduces it.
+
+    ``seed`` is a config value rather than a runtime default on purpose: the
+    bootstrap interval appears in a report, and a reader must be able to rerun
+    the exact configuration and get the exact interval back (eval/bootstrap
+    requires the seed for the same reason).
+    """
+
+    n: int = 10_000
+    seed: int = 0
+
+    @model_validator(mode="after")
+    def _check_ranges(self) -> "BootstrapConfig":
+        if self.n < 1:
+            raise ValueError(f"bootstrap.n must be >= 1; got {self.n}")
+        return self
+
+
 class VariantConfig(_Base):
     """One runnable backtest variant: which market, league, model, and how to
     stake and evaluate it. `uncertainty_percentile` is None for the point
@@ -115,11 +136,17 @@ class VariantConfig(_Base):
     market: str
     league: str
     seasons: list[str]
+    # Which books may price a row (markets.base owns the policy set, because
+    # the policy is part of the odds contract, not of YAML parsing). Recorded
+    # in the run's config JSON so a report can say which prices its ROI came
+    # from — see docs/DATA_NOTES.md for why that matters.
+    odds_policy: str = DEFAULT_ODDS_POLICY
     model: ModelSpec
     staking: StakingConfig
     bankroll: BankrollConfig
     uncertainty_percentile: float | None = None
     backtest: BacktestConfig
+    bootstrap: BootstrapConfig = Field(default_factory=BootstrapConfig)
 
     @field_validator("name", "market", "league")
     @classmethod
@@ -147,6 +174,18 @@ class VariantConfig(_Base):
                 raise ValueError(
                     f"season {season!r} is not a 4-digit code like '1819'"
                 )
+        return value
+
+    @field_validator("odds_policy")
+    @classmethod
+    def _check_odds_policy(cls, value: str) -> str:
+        # A typo like "pinnacle" would otherwise become an unknown policy
+        # name that only fails when the first row resolves odds, deep inside a
+        # run. Reject it at load time, with the list of real policies.
+        if value not in ODDS_POLICIES:
+            raise ValueError(
+                f"odds_policy must be one of {list(ODDS_POLICIES)}; got {value!r}"
+            )
         return value
 
     @field_validator("uncertainty_percentile")
@@ -209,4 +248,4 @@ def load_all(directory: str | Path) -> dict[str, VariantConfig]:
     return variants
 
 
-__all__ = ["VariantConfig", "load_variant", "load_all"]
+__all__ = ["BootstrapConfig", "VariantConfig", "load_variant", "load_all"]

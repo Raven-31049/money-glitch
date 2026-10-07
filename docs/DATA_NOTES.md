@@ -22,3 +22,18 @@ used, and again when 2526 analyses are started.
 Also observed on 2026-10-06: the download URL responds with a 302 redirect;
 the followed GET returns the same bytes as the cache, so nothing to act on now,
 but a future refactor should follow redirects explicitly.
+
+## Response: the run's odds source is now a config setting, recorded per bet
+
+- **Recorded:** 2026-10-06
+- Variant configs gained `odds_policy`, defaulting to `pinnacle_only`
+  (PSC → PS, stopping before Bet365). `fallback` (PSC → PS → B365) is the
+  explicit opt-in for coverage over a sharp reference price.
+- Every prediction and bet stores `odds_source` — the label of the book whose
+  price produced it — so a report's ROI can always be split by provenance.
+- Rows the policy cannot price are skipped and written to the `skipped` table
+  (one row per match per market), and reports print the count alongside the
+  per-source bet count and ROI.
+- This is the mitigation for the E0 2526 Pinnacle gap above: those 170 rows
+  are now *counted as skipped* under `pinnacle_only` instead of being silently
+  priced off Bet365. The underlying data caveat still stands.

@@ -2,6 +2,7 @@ name: epl_mw_naive
 market: match_winner
 league: E0
 seasons: ["1819", "1920", "2021", "2122", "2223", "2324", "2425", "2526"]
+odds_policy: pinnacle_only
 model:
   type: naive_frequency
   params: {}
@@ -15,3 +16,7 @@ bankroll:
   stop_on_breach: true
 backtest:
   min_train_days: 60
+  refit_every_days: 1
+bootstrap:
+  n: 10000
+  seed: 42

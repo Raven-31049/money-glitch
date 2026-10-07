@@ -12,9 +12,9 @@ import shutil
 from pathlib import Path
 
 import pandas as pd
-import pytest
+import pytest  # pyright: ignore[reportMissingImports]
 
-from bet_engine.data import ingest
+from bet_engine.data import ingest  # pyright: ignore[reportMissingImports]
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

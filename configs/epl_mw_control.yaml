@@ -2,6 +2,7 @@ name: epl_mw_control
 market: match_winner
 league: E0
 seasons: ["1819", "1920", "2021", "2122", "2223", "2324", "2425", "2526"]
+odds_policy: pinnacle_only
 model:
   type: pure_market
   params: {}
@@ -16,3 +17,6 @@ bankroll:
 backtest:
   min_train_days: 30
   refit_every_days: 1
+bootstrap:
+  n: 10000
+  seed: 42
