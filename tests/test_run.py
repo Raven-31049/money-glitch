@@ -93,6 +93,25 @@ def test_tripwire_raises_when_the_control_somehow_selects_a_bet(
         _run(_config("control_fx", "pure_market"), tmp_path)
 
 
+def test_selection_uses_the_raw_odds_actually_paid(tmp_path, monkeypatch):
+    """Regression for S5: run once fed fair odds (1 / market_prob) into selection."""
+    import bet_engine.run as run_module
+
+    captured: dict = {}
+    real = run_module.select_bets
+
+    def spy(candidates, threshold):
+        captured["odds"] = candidates["odds"].copy()
+        captured["fair"] = (1.0 / candidates["market_prob"]).copy()
+        return real(candidates, threshold)
+
+    monkeypatch.setattr(run_module, "select_bets", spy)
+    _run(_config("raw_fx", "naive_frequency"), tmp_path)
+
+    assert len(captured["odds"]) > 0
+    assert not captured["odds"].equals(captured["fair"])
+
+
 # --- the baseline actually bets ---------------------------------------------
 
 def test_naive_places_bets_and_persists_both_ledgers(tmp_path):

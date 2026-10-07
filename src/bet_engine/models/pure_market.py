@@ -2,20 +2,20 @@
 
 Invariant 4 (AGENTS.md): this "model" must place ~0 bets â€” any bet it places
 is an EV/Kelly bug, not an edge. It predicts exactly what the market's own
-prices, de-vigged, say; measured against the fair price those probabilities
-imply, its edge is *exactly* zero, and ``select_bets``' strict ``>`` refuses
-every row.
+prices, de-vigged, say. EV is measured on the raw odds actually paid
+(PLAN.md §5): for every outcome the control's edge is
+``market_prob * raw_odds - 1 = 1 / overround - 1 < 0``, because the de-vigged
+probability times the book's price is the inverse overround. ``select_bets``'
+strict ``>`` therefore refuses every row.
 
 WHY the reference de-vig lives in this module: ``market_prob`` (the run's
 column for "what the market says after vig") and this model's prediction are
 the same quantity by definition, so the run computes ``market_prob`` by
 calling :func:`devig_long` â€” the very function ``predict`` calls â€” and the
-two are bit-identical, never merely close. That identity is what makes the
-control's EV land on exactly ``0.0``: ``p * (1.0 / p)`` rounds to 1.0 for
-any finite p (the division's error stays within the rounding half-step of
-the product), so ``p * (1.0 / p) - 1.0 == 0.0`` and no float noise can
-occasionally clear a zero threshold. A hand-rolled second de-vig anywhere
-else in the pipeline would break that guarantee.
+two are bit-identical, never merely close. That identity keeps the control's
+edge at the single negative value ``1 / overround - 1`` rather than drifting
+with a second de-vig: a hand-rolled de-vig anywhere else in the pipeline
+would break it.
 
 The run also imports :func:`devig_long` for its ``market_prob`` column, so
 the control's identity is structural, not a convention someone must

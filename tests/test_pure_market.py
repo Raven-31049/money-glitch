@@ -1,10 +1,12 @@
 """Tests for models/pure_market.py: the shared de-vig and the control model.
 
 Invariant 4 rests on one arithmetic identity: the control's ``model_prob``
-must be the run's own ``market_prob``, bit for bit, so EV lands on exactly
-0.0 (or a hair below) and ``select_bets``' strict ``>`` refuses every row.
-These tests prove that identity rather than trusting it, and prove the edge
-itself can never come out positive.
+must be the run's own ``market_prob``, bit for bit. EV is measured on the raw
+odds actually paid (PLAN.md section 5): the de-vigged probability times the
+book's price is the inverse overround, so the control's edge is
+``1 / overround - 1``, strictly negative, and ``select_bets``' strict ``>``
+refuses every row. These tests prove that identity rather than trusting it,
+and prove the edge itself can never come out positive.
 """
 
 from __future__ import annotations
@@ -125,15 +127,37 @@ def test_control_prediction_is_the_runs_market_prob_exactly():
 
 
 def test_control_edge_is_never_positive():
-    """``p * (1 / p) - 1`` must never exceed 0 for any price vector.
+    """``market_prob * raw_odds - 1`` must never exceed 0 for a book's prices.
 
-    This is invariant 4's arithmetic core: a positive edge here would mean
-    the control could bet, which is a bug in the EV code, not an edge.
+    This is invariant 4's arithmetic core under the raw-odds EV definition
+    (PLAN.md section 5). A real book prices every outcome with a margin, so the
+    implied probabilities sum to an overround >= 1; the control's edge is then
+    ``1 / overround - 1 <= 0``. A positive edge here would mean the control
+    could bet, which is a bug in the EV code, not an edge.
     """
-    frame = _priced_frame(200, seed=11)
-    long = devig_long(frame, OUTCOMES, value_name="p")
+    rng = np.random.default_rng(11)
+    n = 200
+    fair = rng.dirichlet(np.ones(3), size=n)  # (n, 3), each row sums to 1
+    overround = 1.0 + rng.uniform(0.01, 0.15, size=n)  # book margin, always > 1
+    prices = 1.0 / (fair * overround[:, None])  # (n, 3) book prices
 
-    edges = long["p"] * (1.0 / long["p"]) - 1.0
+    frame = pd.DataFrame({"match_id": [f"m{i}" for i in range(n)]})
+    for column, values in zip((f"odds_{o}" for o in OUTCOMES), prices.T):
+        frame[column] = values
+
+    long = devig_long(frame, OUTCOMES, value_name="p")
+    raw = frame.melt(
+        id_vars="match_id",
+        value_vars=[f"odds_{o}" for o in OUTCOMES],
+        var_name="column",
+        value_name="raw_odds",
+    )
+    raw["outcome"] = raw["column"].str.removeprefix("odds_")
+    merged = long.merge(
+        raw[["match_id", "outcome", "raw_odds"]], on=["match_id", "outcome"]
+    )
+
+    edges = merged["p"] * merged["raw_odds"] - 1.0
 
     assert (edges <= 0.0).all()
     assert edges.max() <= 0.0

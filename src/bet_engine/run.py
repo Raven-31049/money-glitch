@@ -10,18 +10,19 @@ WHY the stages are ordered the way they are:
   never reaches the model, so it is recorded as *skipped* (with the policy
   that skipped it) rather than predicted against a missing price. The report
   accounts for every match: priced + skipped = loaded.
-* **EV selects on de-vigged fair odds; Kelly stakes on raw odds.** A bet must
-  beat the vig-free line to be worth placing (PLAN.md §5), but the money is
-  won or lost at the price the book actually offered, so sizing and settlement
-  both use ``raw_odds``. A selection whose fair edge does not cover the vig
-  gets a Kelly stake of 0 and is not placed — that is the model failing to
-  clear the book's margin, not a bug to paper over.
+* **EV, Kelly and settlement all use the raw odds actually paid.** A bet is
+  worth placing only if ``model_prob * raw_odds - 1`` clears the threshold
+  (PLAN.md §5): the money is won or lost at the price the book offered, so the
+  edge that decides a bet must be measured at that same price. De-vigged odds
+  are used only to produce ``market_prob`` — the control's prediction and the
+  report's market column — never for EV or bet selection.
 * **``market_prob`` and the control's prediction are the SAME computation.**
   Both call :func:`bet_engine.models.pure_market.devig_long` on the same price
-  columns, so they are bit-identical and the control's edge is exactly 0.0
-  (never float noise above 0), which ``select_bets``' strict ``>`` refuses.
-  ``pure_market`` selecting ANY bet therefore means an EV/Kelly bug — the
-  run raises rather than reporting it as an edge (invariant 4).
+  columns, so they are bit-identical. Measured against the raw odds paid, the
+  control's edge is ``market_prob * raw_odds - 1 < 0`` wherever the book prices
+  above fair, which ``select_bets``' strict ``>`` refuses. ``pure_market``
+  selecting ANY bet therefore means an EV/Kelly bug — the run raises rather
+  than reporting it as an edge (invariant 4).
 * **Both stop modes simulate the SAME selection frame.** Stop-on-breach
   changes how many bets get *placed*, never which bets are considered or what
   they size at, so the two curves differ only in the breach (invariant 2).
@@ -122,10 +123,11 @@ def run(
     )
 
     # Invariant 4, enforced where the bug would actually manifest: before any
-    # money logic runs, not as a note in a report nobody reads.
+    # money logic runs, not as a note in a report nobody reads. Selection runs
+    # on the raw odds actually paid (PLAN.md §5); market_prob is carried only
+    # for the control's identity check and for reporting.
     candidates = full.loc[full["settled"]].copy()
     candidates["raw_odds"] = candidates["odds"]
-    candidates["odds"] = 1.0 / candidates["market_prob"]
     selected = select_bets(candidates, config.staking.ev_threshold)
     if config.model.type == "pure_market" and len(selected):
         raise RuntimeError(

@@ -252,18 +252,41 @@ def test_threshold_comparison_is_strict_not_inclusive():
     assert select_bets(frame, 0.5)["outcome"].tolist() == ["D"]
 
 
+def test_ev_uses_the_paid_odds_not_the_de_vigged_fair_odds():
+    # market_prob 0.50 implies a fair price of 2.0; the model says 0.55, so the
+    # edge on fair odds is 0.55 * 2.0 - 1 = +0.10 and would clear the 0.05
+    # threshold. The book only pays 1.8, so the edge on the odds actually paid
+    # is 0.55 * 1.8 - 1 = -0.01: the bet must NOT be selected (PLAN.md section 5).
+    raw_frame = _frame(
+        [
+            {
+                "match_id": "m1",
+                "market": "match_winner",
+                "outcome": "H",
+                "odds": 1.8,
+                "model_prob": 0.55,
+            }
+        ]
+    )
+    fair_frame = raw_frame.assign(odds=[2.0])  # 1 / market_prob == 2.0
+
+    assert select_bets(raw_frame, 0.05).empty
+    assert select_bets(fair_frame, 0.05)["outcome"].tolist() == ["H"]
+
+
 def test_pure_market_control_places_no_bets():
     raw = {"H": 2.0, "D": 3.4, "A": 4.0}
     probs, _ = devig(raw)
     # Zero model weight: the model believes the de-vigged market exactly, and
-    # the odds are that same market's prices — so every EV is 0 by construction.
+    # it bets at the raw book prices. Every EV is (1 / overround) - 1, which is
+    # strictly negative, so the control places nothing.
     frame = _frame(
         [
             {
                 "match_id": "m1",
                 "market": "match_winner",
                 "outcome": outcome,
-                "odds": 1.0 / probability,
+                "odds": raw[outcome],
                 "model_prob": probability,
             }
             for outcome, probability in probs.items()

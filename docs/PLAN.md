@@ -56,7 +56,7 @@ src/bet_engine/
     staking.py         # edge threshold, fractional Kelly, per-bet caps
     bankroll.py        # bankroll, drawdown, stop_on_breach handling
   eval/
-    bootstrap.py       # day-block bootstrap on the full bet sequence
+    bootstrap.py       # single-bet bootstrap on the full bet sequence
     calibration.py     # Brier, log loss, reliability bins, ECE
     report.py          # both breach modes, significance, sample-size warning
 tests/                 # pytest
@@ -112,10 +112,14 @@ internally. The stored percentiles are never rewritten to sum to 1.
 methods (proportional and Shin or power). Method choice is recorded per market.
 The control variant uses de-vigged odds only, with model weight 0.
 
-**EV and Kelly.** EV is computed on de-vigged odds. Kelly is fractional with a
+**EV and Kelly.** EV is computed on the odds actually paid (the raw book odds):
+`ev = model_prob * raw_odds - 1`. De-vigged odds are used only to produce the
+market's probability — the pure-market control's prediction and the report's
+`market_prob` column — never for EV or bet selection. Kelly is fractional with a
 configurable cap and a hard per-bet stake ceiling. A bet is placed only if it clears
-the edge threshold; with model weight 0 the edge is ~0 everywhere, so the pure market
-control places no bets. This is the tripwire for EV/Kelly bugs.
+the edge threshold; with model weight 0 the raw-odds edge is negative wherever the
+book prices above fair, so the pure market control places no bets. This is the
+tripwire for EV/Kelly bugs.
 
 **Stop on breach.** `stop_on_breach=True` halts the strategy at the first hard limit
 breach (drawdown limit, per-bet cap violation, non-finite edge, stale odds beyond
@@ -127,9 +131,9 @@ everything strictly before the fold's day start, in the league's timezone (UTC b
 default, configurable per league). The engine asserts
 `max(train.timestamp) < fold.day_start` at runtime.
 
-**Bootstrap.** Block bootstrap resampling whole calendar days, because bets within a
-day are correlated through shared conditions. Always computed on the full,
-untruncated sequence. Reports state the resampling unit and block size.
+**Bootstrap.** Resamples individual bet P&Ls, drawn with replacement; the single bet
+is the resampling unit. Always computed on the full, untruncated sequence. Reports
+state the resampling unit.
 
 **Honesty rules in reporting.** No ROI conclusion from fewer than ~100 bets without
 an explicit "sample too small" statement. Every report states the bet count, the
@@ -181,7 +185,7 @@ Exit: `uv run pytest` passes; `uv run python -c "import bet_engine"` works.
 ### Phase 5 — Validation engine
 - Walk-forward engine with the temporal assertion.
 - Backtest with both `stop_on_breach` modes.
-- Bankroll simulation, block bootstrap, calibration, control harness.
+- Bankroll simulation, bootstrap, calibration, control harness.
 - Exit: a leakage test that deliberately trains on future data **fails loudly**;
   both breach modes reported; bootstrap runs on the full sequence even when the
   reported backtest halted.
@@ -222,6 +226,13 @@ Before declaring any phase done:
 
 ## 9. Change log
 
+- Phase 0 gate fixes. §5: EV is now defined on the raw odds actually paid
+  (`model_prob * raw_odds - 1`); de-vigged odds only produce the market
+  probability (control prediction and reporting). §5 Bootstrap corrected to
+  single-bet resampling — the code already did this; the old day-block wording
+  was never implemented. §3 layout comment and §6 Phase 5 wording updated to
+  match. `run.py` selection changed from fair odds to raw odds; a regression test
+  pins it.
 - Phase 0 scaffold built (26 files). Section 3 rewritten to match the tree that
   actually exists; stale names (`store.py`, `schema.sql`, `validation/`,
   `moneyline.py`) replaced with `db.py`, `eval/` + `backtest/`, `match_winner.py`.
