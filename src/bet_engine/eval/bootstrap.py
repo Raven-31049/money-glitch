@@ -8,7 +8,7 @@ shows alongside it (invariant 2). The guard is what keeps "the bootstrap ran
 on everything" true by construction instead of by convention.
 
 Resampling unit is the single bet, drawn with replacement — the unit is stated
-here because reports must state it (docs/PLAN.md §5). Draws are produced in
+here because reports must state it (docs/IMPLEMENTATION_NOTES.md §5). Draws are produced in
 vectorised numpy batches: no Python-level loop over resamples, and batches are
 sized so a large ``n`` never materialises one giant ``(n, n_bets)`` array.
 

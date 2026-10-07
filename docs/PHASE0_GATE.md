@@ -1,56 +1,64 @@
 # Phase 0 gate review
 
-Date: 2026-10-07. Scope: **only the four Phase 0 "Built" checkboxes** in
-`docs/PLAN.md` §6 (Phase 0, lines 144–148). Everything outside those four items
-is listed under [Deferred / later phases](#deferred--later-phases), tagged with
-the PLAN.md phase it belongs to. The non-negotiable invariants (§2) and the §7
-per-phase checklist are not part of this grade; they are cross-cutting rules and
-appear in the deferred section.
+Date: 2026-10-07. Scope: **only the four items in the Phase 0 "Gate checklist"**
+in `docs/PLAN.md` (Phase 0, lines 31–36). Everything outside those four items is
+listed under [Deferred / later phases](#deferred--later-phases), tagged with the
+phase it belongs to. The rest of PLAN.md (build lists, lessons learned) and
+IMPLEMENTATION_NOTES.md are not part of this grade.
 
 Full suite run for this review:
 
 ```
 $ uv run pytest -q
-380 passed in 10.20s        (378 before this pass + 2 new tests)
+380 passed in 10.20s
 ```
 
 ## Verdict
 
-**Phase 0 four-checkbox gate: NOT PASSED.** Checkboxes 1, 3 and 4 pass.
-Checkbox 2 ("docstring + TODO modules, **no logic**") is not met by the current
-tree: the scaffold was built (commit `1f923e2`) and then superseded by working
-modules built ahead of the phase gates (see S1 in the deferred section). Nothing
-is structurally missing; the item as literally written can only be cleared by
-accepting the superseded state or re-wording PLAN.md.
+**Phase 0 four-item gate: PASSED.** All four Phase 0 "Gate checklist" items are
+met by the current tree.
 
-| # | Phase 0 checkbox (PLAN.md §6) | Verdict | Proof |
+| # | Phase 0 Gate checklist item (PLAN.md, verbatim) | Verdict | Proof |
 | --- | --- | --- | --- |
-| 1 | `uv` installed (0.12.x); `pyproject.toml` with Python 3.11+; src layout; pytest config | **PASS** | `uv --version` → `0.12.23`; `pyproject.toml:6` `requires-python = ">=3.11"`; `pyproject.toml:25-26` `packages = ["src/bet_engine"]`; `pyproject.toml:28-29` `testpaths = ["tests"]` |
-| 2 | `src/bet_engine/` package skeleton — docstring + TODO modules, **no logic** | **NOT passed** | Skeleton exists and matches §3, but modules are full implementations (`run.py`, `walkforward.py`, `bankroll.py`, `staking.py`, `bootstrap.py`, `calibration.py`, `report.py`, `naive_frequency.py`, `pure_market.py`). See S1 |
-| 3 | `.gitignore` (Python + `data/` + `reports/`); tracked `.gitkeep` placeholders | **PASS** | `.gitignore` has the Python block and `data/raw/*`/`data/processed/*`/`reports/*` with `!.gitkeep` negations; `git ls-files "*.gitkeep"` → 4 tracked files |
-| 4 | All declared dependencies installed; `uv.lock` committed | **PASS** | `uv run python -c "import scipy, statsmodels, requests, pandas, numpy, pydantic, yaml"` → `deps OK`; `git ls-files uv.lock` → `uv.lock` |
+| 1 | No-lookahead assertion present and tested against a deliberately-broken case | **PASS** | `walkforward.py:79` `assert_train_before_predict`; `tests/test_walkforward.py:203` `test_a_leaky_split_is_refused_before_the_first_fit` runs a deliberately-leaky split and asserts it raises **before any model is constructed** (`factory.calls == 0`); `tests/test_walkforward.py:323` proves the check survives `python -O` |
+| 2 | Both stop_on_breach modes implemented and produce different results on a toy case | **PASS** | `tests/test_bankroll.py:168` `test_the_stop_flag_changes_the_final_bankroll` runs the same toy frame both ways: stopped `800` vs played-on `1382.4`; the flag is a parameter of `simulate(..., stop_on_breach=...)` in `src/bet_engine/backtest/bankroll.py` |
+| 3 | Bootstrap checker runs on a synthetic known-edge and known-no-edge sequence, correctly distinguishing them | **PASS** | `tests/test_bootstrap.py:56` 55% wins -> `fraction_profitable > 0.95`; `:68` 50% (no edge) -> `0.4 < fraction_profitable < 0.6`; `:76` 45% -> `fraction_profitable < 0.05` |
+| 4 | Control-variant pattern works for at least one market before building a second | **PASS** | `tests/test_run.py:64` `test_control_places_no_bets_in_either_stop_mode` (0 bets in both modes, both simulated); `tests/test_staking.py:277` `test_pure_market_control_places_no_bets`; only `match_winner` exists, so "before building a second" holds |
 
-### Checkbox evidence detail
+### Item evidence detail
 
-**1 — toolchain / layout / pytest config.** `uv --version` →
-`uv 0.12.23 (46b84fd0b 2026-10-03 x86_64-pc-windows-msvc)` (0.12.x). src layout
-and pytest config as cited above.
+**1 - no-lookahead assertion, deliberately-broken case.** The check is
+`assert_train_before_predict` (`src/bet_engine/backtest/walkforward.py:79`),
+called by `walk_forward` on every fold. A deliberately-leaky index splitter is
+refused before the first fit (`tests/test_walkforward.py:203`, `factory.calls == 0`,
+"temporal leak" in the message); the guard also survives `python -O` because it
+raises `AssertionError` explicitly instead of using an `assert` statement
+(`tests/test_walkforward.py:323`).
 
-**2 — skeleton, no logic.** `src/bet_engine/` contains `config.py`, `db.py`,
-`data/`, `markets/`, `models/`, `backtest/`, `eval/`, plus `run.py` and
-`schema.sql`, all populated with real implementations and covered by tests. The
-"no logic" half of the checkbox no longer holds.
+**2 - both stop modes, different toy result.** `simulate` takes `stop_on_breach`
+as a parameter (`src/bet_engine/backtest/bankroll.py`). On one toy frame the two
+modes diverge: stopped closes at `800` after the breaching day, played-on
+finishes at `1382.4` (`tests/test_bankroll.py:168`), while the breach itself is
+recorded identically in both (`tests/test_bankroll.py:144`).
 
-**3 — .gitignore / .gitkeep.** Tracked placeholders: `configs/.gitkeep`,
-`data/processed/.gitkeep`, `data/raw/.gitkeep`, `reports/.gitkeep`.
+**3 - bootstrap known-edge vs known-no-edge.** The bootstrap consumes synthetic
+exact-count sequences (`tests/test_bootstrap.py:25`): a 55%-win (positive-edge)
+sequence is profitable in >95% of resamples (`:56`); a 50%-win (zero-edge)
+sequence lands between 0.4 and 0.6 (`:68`); a 45%-win (negative-edge) sequence
+profits in <5% (`:76`). The checker separates the three by the sign of the edge,
+not by the implementation.
 
-**4 — dependencies / lock.** All seven declared dependencies import in the
-locked environment; `uv.lock` is tracked.
+**4 - control-variant for one market.** The `pure_market` control (zero model
+weight, de-vigged odds) places 0 bets in both stop modes end to end
+(`tests/test_run.py:64`) and at the staking layer (`tests/test_staking.py:277`);
+a tripwire raises if it ever selects one (`tests/test_run.py:81`). Only
+`match_winner` exists, which is exactly the "at least one market before building
+a second" the item asks for.
 
-### Phase 0 exit criteria (part of Phase 0, recorded for context)
+### Phase 0 exit criteria (recorded for context)
 
-- `uv run pytest` passes — **PASS**: `380 passed in 10.20s`.
-- `uv run python -c "import bet_engine"` — **PASS**: `import OK: bet_engine`.
+- `uv run pytest` passes - **PASS**: `380 passed in 10.20s`.
+- `uv run python -c "import bet_engine"` - **PASS**: `import OK: bet_engine`.
 
 ---
 
@@ -133,11 +141,4 @@ of the four-checkbox grade above.
 - **S12 — unspecified implementation choices:** microsecond run ids; stopped run
   stored as a derived row (`*_stop`, `derived_from`); `config_hash` = first 12
   hex chars of SHA-256 over sorted config JSON (`eval/report.py:503-512`);
-  small-sample threshold 100 bets (`SMALL_SAMPLE_BETS`).
-
-## To clear the Phase 0 checkbox gate
-
-1. Resolve checkbox 2: accept the superseded "no logic" state, or re-word
-   PLAN.md §6 so the Phase 0 deliverable is what actually shipped.
-2. Add lint/format config (Phase 0 Remaining, R2) and document the command.
-3. Sign off the three same-session test corrections (§7.2).
+   small-sample threshold 100 bets (`SMALL_SAMPLE_BETS`).

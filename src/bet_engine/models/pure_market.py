@@ -3,7 +3,7 @@
 Invariant 4 (AGENTS.md): this "model" must place ~0 bets â€” any bet it places
 is an EV/Kelly bug, not an edge. It predicts exactly what the market's own
 prices, de-vigged, say. EV is measured on the raw odds actually paid
-(PLAN.md §5): for every outcome the control's edge is
+(IMPLEMENTATION_NOTES.md §5): for every outcome the control's edge is
 ``market_prob * raw_odds - 1 = 1 / overround - 1 < 0``, because the de-vigged
 probability times the book's price is the inverse overround. ``select_bets``'
 strict ``>`` therefore refuses every row.

@@ -256,7 +256,7 @@ def test_ev_uses_the_paid_odds_not_the_de_vigged_fair_odds():
     # market_prob 0.50 implies a fair price of 2.0; the model says 0.55, so the
     # edge on fair odds is 0.55 * 2.0 - 1 = +0.10 and would clear the 0.05
     # threshold. The book only pays 1.8, so the edge on the odds actually paid
-    # is 0.55 * 1.8 - 1 = -0.01: the bet must NOT be selected (PLAN.md section 5).
+    # is 0.55 * 1.8 - 1 = -0.01: the bet must NOT be selected (IMPLEMENTATION_NOTES.md section 5).
     raw_frame = _frame(
         [
             {

@@ -2,7 +2,7 @@
 
 Invariant 4 rests on one arithmetic identity: the control's ``model_prob``
 must be the run's own ``market_prob``, bit for bit. EV is measured on the raw
-odds actually paid (PLAN.md section 5): the de-vigged probability times the
+odds actually paid (IMPLEMENTATION_NOTES.md section 5): the de-vigged probability times the
 book's price is the inverse overround, so the control's edge is
 ``1 / overround - 1``, strictly negative, and ``select_bets``' strict ``>``
 refuses every row. These tests prove that identity rather than trusting it,
@@ -130,7 +130,7 @@ def test_control_edge_is_never_positive():
     """``market_prob * raw_odds - 1`` must never exceed 0 for a book's prices.
 
     This is invariant 4's arithmetic core under the raw-odds EV definition
-    (PLAN.md section 5). A real book prices every outcome with a margin, so the
+    (IMPLEMENTATION_NOTES.md section 5). A real book prices every outcome with a margin, so the
     implied probabilities sum to an overround >= 1; the control's edge is then
     ``1 / overround - 1 <= 0``. A positive edge here would mean the control
     could bet, which is a bug in the EV code, not an edge.

@@ -26,3 +26,6 @@ We are building phase by phase. Never build ahead of the current phase.
 - Small modules, type hints, docstrings that explain WHY, not just what.
 - After each task: run the full test suite and report results honestly, including failures.
 - Never report an ROI conclusion from fewer than ~100 bets without stating the sample is too small.
+- docs/PLAN.md belongs to the user. Never edit it, for any reason.
+- If the code and docs/PLAN.md disagree, stop and ask. Never change the plan to match the code.
+- docs/IMPLEMENTATION_NOTES.md may be updated, but it never overrides PLAN.md.

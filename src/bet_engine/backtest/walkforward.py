@@ -81,7 +81,7 @@ def assert_train_before_predict(
 ) -> None:
     """Raise AssertionError unless training ends strictly before the prediction day.
 
-    The invariant written out (PLAN.md, invariant 1):
+    The invariant written out (IMPLEMENTATION_NOTES.md, invariant 1):
     ``max(train.timestamp) < fold.day_start``, where the fold's day start is
     the earliest prediction date normalised to midnight. Comparing against the
     *day start* rather than the batch's earliest kick-off time is the point:

@@ -12,7 +12,7 @@ WHY the stages are ordered the way they are:
   accounts for every match: priced + skipped = loaded.
 * **EV, Kelly and settlement all use the raw odds actually paid.** A bet is
   worth placing only if ``model_prob * raw_odds - 1`` clears the threshold
-  (PLAN.md §5): the money is won or lost at the price the book offered, so the
+  (IMPLEMENTATION_NOTES.md §5): the money is won or lost at the price the book offered, so the
   edge that decides a bet must be measured at that same price. De-vigged odds
   are used only to produce ``market_prob`` — the control's prediction and the
   report's market column — never for EV or bet selection.
@@ -124,7 +124,7 @@ def run(
 
     # Invariant 4, enforced where the bug would actually manifest: before any
     # money logic runs, not as a note in a report nobody reads. Selection runs
-    # on the raw odds actually paid (PLAN.md §5); market_prob is carried only
+    # on the raw odds actually paid (IMPLEMENTATION_NOTES.md §5); market_prob is carried only
     # for the control's identity check and for reporting.
     candidates = full.loc[full["settled"]].copy()
     candidates["raw_odds"] = candidates["odds"]

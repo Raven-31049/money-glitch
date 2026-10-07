@@ -118,7 +118,7 @@ class ReportData:
     """Everything :func:`render_markdown` needs, assembled by the runner.
 
     The config travels as the typed object itself rather than as copied
-    fields: the report must print *the values actually used* (PLAN.md §8),
+    fields: the report must print *the values actually used* (IMPLEMENTATION_NOTES.md §8),
     and one reference cannot drift from what the run executed.
     """
 
@@ -401,7 +401,7 @@ def _headline(report: ReportData) -> str:
 def _bootstrap_lines(report: ReportData) -> list[str]:
     bootstrap = report.bootstrap
     lines = [
-        "Resampling unit: **single bet** (stated per docs/PLAN.md §5); "
+        "Resampling unit: **single bet** (stated per docs/IMPLEMENTATION_NOTES.md §5); "
         "draws are with replacement over the FULL, untruncated bet sequence "
         "(invariant 3).",
         "",
