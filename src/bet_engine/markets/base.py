@@ -22,8 +22,9 @@ Three rules the contract enforces for every market:
   is unpriced under ``pinnacle_only`` — skipped and counted, not quietly priced
   off a different book than the rest of the run.
 
-Tick size and de-vig wiring are Phase 2/3 work (see docs/PLAN.md) and are
-deliberately absent here rather than stubbed as placeholders.
+Tick size and de-vig wiring belong to Phase 1 (cards), Phase 2 (corners) and
+Phase 3 (multi-league) — see docs/PLAN.md — and are deliberately absent here
+rather than stubbed as placeholders.
 """
 
 from __future__ import annotations

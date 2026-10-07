@@ -10,9 +10,8 @@ selectable-by-accident.
 De-vig lives here rather than in probability/ because the edge filter cannot
 mean anything without it: an EV measured against an overrounded price mixes
 model edge with bookmaker margin, and a control that compares *that* to a
-threshold is comparing the wrong quantity. docs/PLAN.md moves richer de-vig
-schemes into probability/devig.py in Phase 2; ``devig`` stays importable from
-here meanwhile.
+threshold is comparing the wrong quantity. Proportional de-vig is the only
+method for now; ``devig`` stays importable from here meanwhile.
 """
 
 from __future__ import annotations
@@ -137,10 +136,13 @@ def select_bets(predictions: pd.DataFrame, ev_threshold: float) -> pd.DataFrame:
       lands on EV exactly 0. ``>=`` would let every fair row through, so the
       control would place bets and invariant 4 would read a staking bug as an
       edge.
-    * **EV uses the frame's ``odds`` column as given.** This function never
-      chooses the price basis: a caller following PLAN.md's "EV on de-vigged
-      odds" passes prices :func:`devig` produced, a raw-book comparison passes
-      raw prices. Deciding here would silently change what a threshold means.
+    * **EV uses the raw odds actually paid.** This function never chooses the
+      price basis — the caller passes the frame's ``odds`` column as given —
+      but the basis that decides a real bet is the raw book price, because the
+      money is won or lost at the price the book offered. De-vigged (fair) odds
+      are used only to produce the market probability, never to size or select a
+      bet. Deciding a different basis here would silently change what a
+      threshold means.
     * **NaN odds is "no price", never a bet.** EV against NaN is not an edge,
       so such rows fall out of the comparison instead of being treated as 0 or
       skipped by accident. A *present but invalid* price (<= 1 or non-finite)
