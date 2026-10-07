@@ -76,9 +76,16 @@ exists yet; it is created when its phase starts, never before.
 
 ```
 src/bet_engine/
-  models/cards_poisson.py   # causal shrunk card rates, team Poisson, league-average control
+  models/cards_poisson.py   # causal shrunk card rates (team + referee), team/team+ref Poisson, league-average control
   markets/cards_totals.py   # hy+ay+hr+ar vs line settlement (not registered: no config `line` yet)
 scripts/phase1_step1_cards.py  # walk-forward calibration report — no odds, no bets
+```
+
+### Built — Phase 1 step 2 (referee variant)
+
+```
+configs/referee_corrections.yaml      # load-time referee name corrections (match-level + aliases)
+scripts/phase1_step2_referee.py       # 3 models on identical matches: scores, paired bootstrap, verdict
 ```
 
 ### Added later, by phase
@@ -237,6 +244,32 @@ Before declaring any phase done:
 
 ## 9. Change log
 
+- Phase 1 step 2 — referee variant and comparison. Gate first: load-time
+  referee name corrections (`configs/referee_corrections.yaml`, applied by
+  `data/ingest.py` — whitespace stripped from text columns, four one-off
+  match-level typo fixes, one global alias; raw CSVs untouched, and a listed
+  match whose referee does not match the expected value raises rather than
+  silently rewriting). 46 → 41 distinct names, 0 remaining bad values;
+  `validate()` now also prints referees with ≤ 2 matches. Every kept-distinct
+  pair (Madley, Smith) and every fix is evidence-checked — see DATA_NOTES.
+  `models/cards_poisson.py` gained `add_referee_feature`: the referee's total
+  cards per match shrunk with the same `k` and the same strictly-before-date
+  rule (league mean when no history), covered by the same causality probe,
+  which now takes `requires`/`watch` so one probe serves both features.
+  `CardsTeamRefPoisson` is the team design plus exactly one column,
+  `log_ref_rate`, registered as `cards_team_ref`; the team-only model and its
+  probe watch are untouched. `coefficient_table()` reports each design term's
+  coefficient, GLM standard error and 95% CI. `scripts/phase1_step2_referee.py`
+  runs 18 walk-forwards (2 datasets × 3 models × 3 lines) on identical match
+  sets (asserted at runtime), no tuning (`k=6` for teams and referees), with a
+  paired match-level bootstrap (10,000 resamples, fixed seed, full match
+  sequence per invariant 3) and an auto-generated plain verdict. Result:
+  team+ref beats team-only 6/6 on Brier and log loss (mean ΔBrier −0.0032),
+  but the Brier 95% interval excludes zero in only 3/6 — improvement
+  consistent, not statistically convincing overall; referee coefficient
+  +0.55 [+0.39, +0.72] (`all`) and +0.45 [+0.28, +0.63] (`no_covid`),
+  clearly positive; 8.9% / 10.5% of scored matches have a referee with fewer
+  than 10 prior matches. 17 new tests (459 total).
 - Phase 1 step 1 — team-only cards model. `models/cards_poisson.py` builds
   per-team rates shrunk toward the league mean *strictly before each date*
   (weight `k`, a config param), and enforces causality at runtime:
