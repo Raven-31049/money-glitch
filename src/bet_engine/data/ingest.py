@@ -22,6 +22,7 @@ from typing import Mapping, Sequence
 
 import pandas as pd
 import requests
+import yaml
 
 _BASE_URL = "https://www.football-data.co.uk/mmz4281"
 _USER_AGENT = (
@@ -142,6 +143,81 @@ def _default_data_dir() -> Path:
     return Path(__file__).resolve().parents[3] / "data" / "raw"
 
 
+def _default_corrections_path() -> Path:
+    """Repo-level referee corrections: <repo root>/configs/referee_corrections.yaml."""
+    return Path(__file__).resolve().parents[3] / "configs" / "referee_corrections.yaml"
+
+
+# Human-readable text columns that must never carry stray leading/trailing
+# whitespace — a single trailing space would create a phantom referee.
+_TEXT_COLUMNS: Sequence[str] = ("home", "away", "referee")
+
+
+def _strip_text(df: pd.DataFrame) -> pd.DataFrame:
+    """Strip leading/trailing whitespace from every text column, in place.
+
+    Source files occasionally carry a padded value (e.g. "J Gillett "); leaving
+    it would split one person's history across two identities and corrupt any
+    per-referee or per-team grouping built on top.
+    """
+    for col in _TEXT_COLUMNS:
+        df[col] = df[col].map(
+            lambda v: v.strip() if isinstance(v, str) else v
+        )
+    return df
+
+
+def _apply_referee_corrections(
+    df: pd.DataFrame, path: Path | None = None
+) -> pd.DataFrame:
+    """Apply configs/referee_corrections.yaml to a canonical frame, in place.
+
+    Two kinds of correction, both required to exist in the file (a missing file
+    is a configuration error, not a no-op — silently skipping approved fixes
+    would let the typos back in):
+
+    - ``match_corrections``: one-off data-entry errors keyed by match_id. The
+      keyed row's current referee must equal the recorded ``referee`` value or
+      a ValueError is raised, so a changed source file surfaces as an error
+      rather than a wrong rewrite. Match-scoped on purpose: a real future
+      referee who happens to share the mistyped name is never merged.
+    - ``aliases``: whole-name renames applied everywhere — one real person whose
+      name is spelled inconsistently across source files.
+
+    Corrections whose match_id is absent (season not loaded) are skipped.
+    """
+    path = path or _default_corrections_path()
+    if not path.exists():
+        raise FileNotFoundError(
+            f"referee corrections file not found: {path} — it ships with the "
+            "repo and must not be skipped"
+        )
+    config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    corrections = config.get("match_corrections") or {}
+    aliases = config.get("aliases") or {}
+
+    for match_id, spec in corrections.items():
+        mask = df["match_id"] == match_id
+        if not mask.any():
+            continue
+        expected = spec["referee"]
+        to = spec["to"]
+        found = df.loc[mask, "referee"]
+        unexpected = sorted(set(found[found != expected]))
+        if unexpected:
+            raise ValueError(
+                f"{path.name}: {match_id}: expected referee {expected!r}, "
+                f"found {unexpected!r} — source file changed since the "
+                f"correction was recorded; re-verify {spec.get('evidence', '')}"
+            )
+        df.loc[mask, "referee"] = to
+
+    for old, new in aliases.items():
+        df.loc[df["referee"] == old, "referee"] = new
+
+    return df
+
+
 def _fetch(url: str, dst: Path) -> None:
     """Download `url` into `dst` atomically (temp file, then rename).
 
@@ -229,13 +305,24 @@ def _read_canonical(div: str, season: str, path: Path) -> pd.DataFrame:
     return frame
 
 
-def load_league(div: str, seasons: Sequence[str], data_dir: Path | None = None) -> pd.DataFrame:
+def load_league(
+    div: str,
+    seasons: Sequence[str],
+    data_dir: Path | None = None,
+    referee_corrections: Path | None = None,
+) -> pd.DataFrame:
     """Load one league across seasons as a single canonical DataFrame.
 
     Each season is read from its cache (downloading once if needed), then all
     seasons are joined on the union of columns — a bookmaker absent from one
     season is NaN there, never a crash. Returns rows sorted by date then
     match_id, with the canonical column order above.
+
+    Before returning, text columns are whitespace-stripped and
+    configs/referee_corrections.yaml is applied (see
+    _apply_referee_corrections). Raw CSVs are never modified; corrections
+    live only in the returned frame. `referee_corrections` overrides the
+    default config path (used by tests).
     """
     frames = []
     for season in seasons:
@@ -245,6 +332,8 @@ def load_league(div: str, seasons: Sequence[str], data_dir: Path | None = None) 
         raise ValueError("load_league needs at least one season")
 
     df = pd.concat(frames, join="outer", ignore_index=True)
+    df = _strip_text(df)
+    df = _apply_referee_corrections(df, referee_corrections)
     odds = sorted(c for c in df.columns if c not in _BASE_ORDER and c != "covid_affected")
     df = df[[*_BASE_ORDER, *odds, "covid_affected"]]
     # mergesort is stable, so within an equal date the season/id order is the
@@ -256,12 +345,17 @@ def validate(df: pd.DataFrame) -> dict:
     """Print and return a data-quality summary of a canonical league frame.
 
     Checks: rows per season, % missing per key column, date range, duplicate
-    match_ids, and the covid_affected population (total and per season).
+    match_ids, the covid_affected population (total and per season), and any
+    referee with 2 or fewer matches — a rare name is the signature of a
+    data-entry typo (the mechanism that produced "K Kavanagh" et al.), so
+    future typos get flagged here automatically.
     """
     season_counts = df.groupby("season", dropna=False).size()
     key_cols = ["date", "home", "away", "fthg", "ftag", "ftr", "referee"]
     missing_pct = (100.0 * df[key_cols].isna().mean()).round(2)
     covid_by_season = df.groupby("season")["covid_affected"].sum().astype(int)
+    referee_counts = df["referee"].value_counts(dropna=True)
+    rare_referees = referee_counts[referee_counts <= 2]
 
     summary = {
         "rows": int(len(df)),
@@ -272,6 +366,7 @@ def validate(df: pd.DataFrame) -> dict:
         "duplicate_match_ids": int(df["match_id"].duplicated().sum()),
         "covid_affected_total": int(df["covid_affected"].sum()),
         "covid_affected_by_season": covid_by_season,
+        "rare_referees": rare_referees.astype(int),
     }
 
     print("Rows per season:")
@@ -283,6 +378,11 @@ def validate(df: pd.DataFrame) -> dict:
     print(f"covid_affected: {summary['covid_affected_total']} matches")
     print("covid_affected by season:")
     print(covid_by_season.to_string())
+    print("\nReferees with <= 2 matches (check for typos):")
+    if len(rare_referees):
+        print(rare_referees.to_string())
+    else:
+        print("none")
     return summary
 
 

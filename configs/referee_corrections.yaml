@@ -1,0 +1,44 @@
+# Referee-name corrections, applied at load time by
+# bet_engine.data.ingest.load_league. Raw CSVs are NEVER edited.
+#
+# match_corrections: one-off source data-entry errors, keyed by match_id so a
+# real future referee whose name happens to match is never merged by mistake.
+#   match_id:
+#     referee: <expected value after whitespace stripping>  (safety check)
+#     to: <correct name>
+#     evidence: <source that verified the correct referee>
+# If a listed match is present but its referee differs from `referee`,
+# load_league raises instead of silently mis-correcting.
+#
+# aliases: whole-name renames applied to every row — for one person whose name
+# is spelled inconsistently across source files.
+
+match_corrections:
+  1920_20200118_man_city_crystal_palace:
+    referee: S Scott
+    to: G Scott
+    evidence: >-
+      FBref match record lists Graham Scott as referee
+      (Man City 2-2 Crystal Palace, 2020-01-18).
+  2021_20210516_everton_sheffield_united:
+    referee: A Moss
+    to: J Moss
+    evidence: >-
+      FBref match record lists Jonathan Moss as referee
+      (Everton 0-1 Sheffield United, 2021-05-16).
+  2425_20250214_brighton_chelsea:
+    referee: K Kavanagh
+    to: C Kavanagh
+    evidence: >-
+      ESPN match crew and chelsea-fc-news both list Chris Kavanagh
+      as referee (Brighton 3-0 Chelsea, 2025-02-14).
+  2425_20250414_bournemouth_fulham:
+    referee: O Oliver
+    to: M Oliver
+    evidence: >-
+      premierleague.com official match report lists Michael Oliver
+      as referee (Bournemouth 1-0 Fulham, 2025-04-14).
+
+aliases:
+  # Sunny Singh Gill — surname appears as "Singh" in some football-data files.
+  S Singh: S Singh Gill

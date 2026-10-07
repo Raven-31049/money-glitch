@@ -135,3 +135,135 @@ def test_load_league_sorts_by_date_then_match_id(monkeypatch, tmp_path):
     assert df["date"].is_monotonic_increasing
     for _, group in df.groupby("date"):
         assert group["match_id"].is_monotonic_increasing
+
+
+# --- referee corrections (configs/referee_corrections.yaml) -------------------
+
+REPO_CORRECTIONS = Path(__file__).parents[1] / "configs" / "referee_corrections.yaml"
+
+
+def _write_csv(tmp_path: Path, rows: str) -> None:
+    header = "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR,Referee\n"
+    (tmp_path / "E0_1819.csv").write_text(header + rows, encoding="utf-8")
+
+
+def test_whitespace_is_stripped_from_text_columns(monkeypatch, tmp_path):
+    _write_csv(tmp_path, "E0,01/09/2018,Arsenal,Chelsea,1,0,H,  J Gillett  \n")
+    monkeypatch.setattr(ingest, "_fetch", _forbid_network)
+
+    df = ingest.load_league("E0", ["1819"], tmp_path)
+
+    assert df.loc[0, "referee"] == "J Gillett"
+    assert df.loc[0, "home"] == "Arsenal"
+    assert df.loc[0, "away"] == "Chelsea"
+    # The padding must not leak into the match_id either.
+    assert df.loc[0, "match_id"] == "1819_20180901_arsenal_chelsea"
+
+
+def test_match_specific_correction_changes_only_that_match(monkeypatch, tmp_path):
+    _prime(tmp_path, "E0_1920.csv")
+    monkeypatch.setattr(ingest, "_fetch", _forbid_network)
+    target = "1920_20190810_norwich_liverpool"
+    corrections = tmp_path / "corrections.yaml"
+    corrections.write_text(
+        "match_corrections:\n"
+        f"  {target}:\n"
+        "    referee: Michael Oliver\n"
+        "    to: Test Referee\n"
+        "    evidence: unit test\n"
+        "aliases: {}\n",
+        encoding="utf-8",
+    )
+
+    df = ingest.load_league(
+        "E0", ["1920"], tmp_path, referee_corrections=corrections
+    )
+
+    changed = df.loc[df["match_id"] == target, "referee"]
+    assert list(changed) == ["Test Referee"]
+    # Every other row keeps its original referee, including the other
+    # Michael Oliver row — the correction is match-scoped, not a name alias.
+    untouched = df.loc[df["match_id"] != target, "referee"]
+    assert set(untouched) == {"Michael Oliver", "Jonathan Moss", "Simon Hooper"}
+    assert (untouched == "Michael Oliver").sum() == 1
+
+
+def test_alias_applies_to_every_row_with_that_name(monkeypatch, tmp_path):
+    _prime(tmp_path, "E0_1920.csv")
+    monkeypatch.setattr(ingest, "_fetch", _forbid_network)
+    corrections = tmp_path / "corrections.yaml"
+    corrections.write_text(
+        "match_corrections: {}\n"
+        "aliases:\n"
+        "  Michael Oliver: M. Oliver\n",
+        encoding="utf-8",
+    )
+
+    df = ingest.load_league(
+        "E0", ["1920"], tmp_path, referee_corrections=corrections
+    )
+
+    assert (df.loc[df["referee"] == "M. Oliver", "home"] == ["Norwich", "Aston Villa"]).all()
+    assert (df["referee"] == "Michael Oliver").sum() == 0
+    # Non-aliased referees are untouched.
+    assert set(df.loc[df["referee"] != "M. Oliver", "referee"]) == {
+        "Jonathan Moss",
+        "Simon Hooper",
+    }
+
+
+def test_raw_csv_is_unchanged_by_load(monkeypatch, tmp_path):
+    _prime(tmp_path, "E0_1920.csv")
+    monkeypatch.setattr(ingest, "_fetch", _forbid_network)
+    csv_path = tmp_path / "E0_1920.csv"
+    before = csv_path.read_bytes()
+
+    ingest.load_league("E0", ["1920"], tmp_path)
+
+    assert csv_path.read_bytes() == before
+
+
+def test_missing_corrections_file_raises(monkeypatch, tmp_path):
+    _prime(tmp_path, "E0_1920.csv")
+    monkeypatch.setattr(ingest, "_fetch", _forbid_network)
+
+    with pytest.raises(FileNotFoundError):
+        ingest.load_league(
+            "E0",
+            ["1920"],
+            tmp_path,
+            referee_corrections=tmp_path / "does_not_exist.yaml",
+        )
+
+
+def test_repo_corrections_file_ships_approved_entries():
+    import yaml
+
+    config = yaml.safe_load(REPO_CORRECTIONS.read_text(encoding="utf-8"))
+
+    assert set(config["match_corrections"]) == {
+        "1920_20200118_man_city_crystal_palace",
+        "2021_20210516_everton_sheffield_united",
+        "2425_20250214_brighton_chelsea",
+        "2425_20250414_bournemouth_fulham",
+    }
+    for spec in config["match_corrections"].values():
+        assert spec["referee"] and spec["to"] and spec["evidence"]
+    assert config["aliases"] == {"S Singh": "S Singh Gill"}
+
+
+def test_validate_flags_referees_with_two_or_fewer_matches(monkeypatch, tmp_path):
+    _prime(tmp_path, "E0_1920.csv")
+    monkeypatch.setattr(ingest, "_fetch", _forbid_network)
+    df = ingest.load_league("E0", ["1920"], tmp_path)
+    # Duplicate the fixture so Michael Oliver has 4 matches while the two
+    # single-appearance referees stay at 2 (also <= 2).
+    doubled = pd.concat(
+        [df, df.assign(match_id=df["match_id"] + "_b")], ignore_index=True
+    )
+
+    summary = ingest.validate(doubled)
+
+    rare = summary["rare_referees"]
+    assert rare.to_dict() == {"Jonathan Moss": 2, "Simon Hooper": 2}
+    assert "Michael Oliver" not in rare.index

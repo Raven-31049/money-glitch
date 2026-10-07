@@ -50,3 +50,33 @@ but a future refactor should follow redirects explicitly.
 - Implication: every over/under probability in the Phase 1 step 1 report is
   provisional. Re-check against the chosen source's line before any
   comparison between model probabilities and market prices.
+
+## Referee name corrections - applied at load time
+
+- **Checked:** 2026-10-07
+- A full 8-season scan (3040 rows, 46 distinct raw spellings) found one
+  whitespace duplicate and four one-off data-entry typos. All five were
+  verified against official match reports before approval:
+  - `'J Gillett '` (trailing space, 2324) = `J Gillett` - PL's own RefCam
+    statement confirms Jarred Gillett refereed Palace v Man Utd 2024-05-06.
+  - `K Kavanagh` (2425) -> `C Kavanagh` - Brighton v Chelsea 2025-02-14 was
+    refereed by Chris Kavanagh (ESPN crew + chelsea-fc-news).
+  - `O Oliver` (2425) -> `M Oliver` - Bournemouth v Fulham 2025-04-14 was
+    refereed by Michael Oliver (premierleague.com match report).
+  - `A Moss` (2021) -> `J Moss` - Everton v Sheff Utd 2021-05-16 was refereed
+    by Jonathan Moss (FBref match record).
+  - `S Scott` (1920) -> `G Scott` - Man City v Palace 2020-01-18 was refereed
+    by Graham Scott (FBref match record).
+- Two look-alike pairs were checked and deliberately NOT merged because they
+  are different real people: `A Madley` vs `R Madley` (Andy vs Bobby Madley)
+  and `L Smith` vs `J Smith` (Lewis vs Josh Smith).
+- `S Singh` was renamed globally to `S Singh Gill` (Sunny Singh Gill, Palace v
+  Luton 2024-03-09) - same person, surname spelled inconsistently by source.
+- Mechanics: text columns are whitespace-stripped at load, and both lists live
+  in `configs/referee_corrections.yaml` (`match_corrections`, keyed by
+  match_id so a real future referee sharing a mistyped name is never merged;
+  and `aliases`, applied everywhere). Raw CSVs are never edited.
+  `validate()` now lists referees with <= 2 matches so future typos surface.
+- Result: 46 -> 41 distinct referee names. Remaining <= 2-match names
+  (R Madley, R Welch, D Webb, O Langford, S Singh Gill) were individually
+  verified as genuine low-count referees, not typos.

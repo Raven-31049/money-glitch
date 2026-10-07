@@ -224,6 +224,22 @@ def _format_error(error: dict) -> str:
     return f"{field}: {message}"
 
 
+# Files under configs/ that are data corrections, not run variants. They live
+# next to the variants for discoverability but must never be validated as one.
+_NON_VARIANT_FILES = frozenset({"referee_corrections.yaml"})
+
+
+def variant_config_paths(directory: str | Path) -> list[Path]:
+    """Every run-variant YAML in a directory, in stable order.
+
+    Non-variant support files (see _NON_VARIANT_FILES) are excluded so a single
+    glob definition drives both load_all and the tests that sweep configs/.
+    """
+    directory = Path(directory)
+    paths = sorted(directory.glob("*.yaml")) + sorted(directory.glob("*.yml"))
+    return [path for path in paths if path.name not in _NON_VARIANT_FILES]
+
+
 def load_all(directory: str | Path) -> dict[str, VariantConfig]:
     """Load every YAML variant config in a directory, keyed by variant name.
 
@@ -234,7 +250,7 @@ def load_all(directory: str | Path) -> dict[str, VariantConfig]:
     directory = Path(directory)
     if not directory.is_dir():
         raise ValueError(f"{directory}: not a directory")
-    paths = sorted(directory.glob("*.yaml")) + sorted(directory.glob("*.yml"))
+    paths = variant_config_paths(directory)
     seen: dict[str, Path] = {}
     variants: dict[str, VariantConfig] = {}
     for path in paths:
@@ -248,4 +264,10 @@ def load_all(directory: str | Path) -> dict[str, VariantConfig]:
     return variants
 
 
-__all__ = ["BootstrapConfig", "VariantConfig", "load_variant", "load_all"]
+__all__ = [
+    "BootstrapConfig",
+    "VariantConfig",
+    "load_variant",
+    "load_all",
+    "variant_config_paths",
+]

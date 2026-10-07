@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest  # pyright: ignore[reportMissingImports]
 import yaml  # pyright: ignore[reportMissingModuleSource]
 
-from bet_engine.config import VariantConfig, load_all, load_variant  # pyright: ignore[reportMissingImports]
+from bet_engine.config import VariantConfig, load_all, load_variant, variant_config_paths  # pyright: ignore[reportMissingImports]
 
 TESTS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TESTS_DIR.parent
@@ -222,7 +222,7 @@ def test_example_configs_load():
 def test_example_configs_state_their_odds_policy_explicitly():
     """Checked in the YAML, not just via the default: a report reader must be
     able to see the policy in the config file the run quotes."""
-    paths = sorted(CONFIGS_DIR.glob("*.yaml")) + sorted(CONFIGS_DIR.glob("*.yml"))
+    paths = variant_config_paths(CONFIGS_DIR)
     assert paths, "no example configs found"
 
     for path in paths:
