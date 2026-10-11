@@ -23,6 +23,7 @@ from .cards_poisson import (
     CardsPoisson,
     CardsTeamRefNegativeBinomial,
     CardsTeamRefPoisson,
+    CardsTotalNegativeBinomial,
     LeagueAveragePoisson,
     add_card_features,
     add_referee_feature,
@@ -41,6 +42,7 @@ MODEL_REGISTRY: dict[str, type] = {
     "cards_team_ref": CardsTeamRefPoisson,
     "cards_nbinom": CardsNegativeBinomial,
     "cards_team_ref_nbinom": CardsTeamRefNegativeBinomial,
+    "cards_total_nbinom": CardsTotalNegativeBinomial,
 }
 
 
@@ -74,6 +76,7 @@ __all__ = [
     "CardsPoisson",
     "CardsTeamRefNegativeBinomial",
     "CardsTeamRefPoisson",
+    "CardsTotalNegativeBinomial",
     "LeagueAveragePoisson",
     "MarketModel",
     "PREDICTION_COLUMNS",

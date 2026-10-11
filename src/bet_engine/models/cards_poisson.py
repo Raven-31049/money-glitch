@@ -40,6 +40,8 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 
+from .count_distributions import SIDE_MAX_COUNT as _SIDE_MAX_COUNT
+from .count_distributions import side_pmf as _side_pmf
 from .count_distributions import total_pmf as _convolved_total_pmf
 
 #: History columns :func:`add_card_features` reads. Nothing else is consulted.
@@ -824,6 +826,146 @@ class CardsTeamRefNegativeBinomial(_NegativeBinomialFit, CardsTeamRefPoisson):
     """
 
 
+class CardsTotalNegativeBinomial(_NegativeBinomialFit, CardsPoisson):
+    """Negative-binomial regression on the match *total*, one row per match.
+
+    WHERE this sits among the other card models: every model above predicts each
+    *side's* own cards, then builds the match total by convolving the two
+    per-side pmfs. The market, though, settles on the total alone. Step 3 found
+    the per-side counts carry essentially no dispersion of their own (alpha ~ 0)
+    while the *total's* variance/mean sits above 1 — home and away cards are
+    correlated through the match and the referee. The direct way to test whether
+    that total-level overdispersion is worth modelling is to target the total
+    itself: one row per match, one negative-binomial likelihood, one dispersion
+    estimated straight from the data instead of assembled from two sides.
+
+    Design is ``const + log home rate + log away rate + log referee rate`` —
+    the same k=6 team and referee features as :class:`CardsTeamRefPoisson`, so
+    any score difference against it is the target and the likelihood, not a
+    change in the information available. (Those are the per-side rates, so the
+    total mean is driven by both teams' discipline and the referee, exactly as
+    the convolved model's would be, but the dispersion is now a single parameter
+    for the total.)
+
+    Over/under is read off this single total pmf — the one-count negative
+    binomial in models/count_distributions.side_pmf — so there is no convolution
+    here: the two-side step is exactly what this model does without.
+    """
+
+    #: Reported by __repr__ so a report cannot confuse the total target with
+    #: the per-side models that share this file.
+    target_name: ClassVar[str] = "total"
+
+    #: The total design reads the referee rate directly, so it needs the column
+    #: add_referee_feature produces — same requirement as the team+referee model.
+    requires_features: ClassVar[tuple[str, ...]] = ("ref_rate",)
+
+    def fit(self, train_df: pd.DataFrame) -> CardsTotalNegativeBinomial:
+        """Estimate the total's coefficients and dispersion from match rows."""
+        frame = _require_features(train_df, self.requires_features)
+
+        # Same guard as the side models: a non-positive rate is a broken
+        # shrinkage input, not a small number, and must be named before log().
+        rates = frame[["home_rate", "away_rate", "ref_rate"]].to_numpy(dtype=float)
+        bad = np.isfinite(rates) & (rates <= 0.0)
+        if bad.any():
+            raise ValueError(
+                "cards_total_nbinom got a non-positive card rate; shrinkage "
+                f"k={self.k} must keep rates > 0 ({int(bad.sum())} cell(s))"
+            )
+
+        design = self._design(frame)
+        endog = frame["total_cards"].to_numpy(dtype="float64")
+
+        usable = np.isfinite(endog) & np.isfinite(design.to_numpy(dtype=float)).all(
+            axis=1
+        )
+        self.n_dropped_rows = int((~usable).sum())
+        self.n_training_rows = int(usable.sum())
+        if not usable.any():
+            raise ValueError(
+                "cards_total_nbinom.fit got no usable training rows "
+                f"({len(frame)} match row(s) supplied, {self.n_dropped_rows} "
+                "dropped for missing cards or features)"
+            )
+
+        self._fit_family(design.loc[usable], endog[usable])
+        return self
+
+    def predict(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Over/under probabilities per match from the single total pmf."""
+        if self._beta is None:
+            raise RuntimeError("predict() called before fit()")
+        frame = _require_features(df, self.requires_features)
+
+        mu_total = self._mu(frame)
+        if not np.isfinite(mu_total).all():
+            bad = frame.loc[~np.isfinite(mu_total), "match_id"].head(3).tolist()
+            raise ValueError(
+                f"cards_total_nbinom produced a non-finite expected total for {bad}"
+            )
+        for match_id, total in zip(frame["match_id"], mu_total):
+            self.predicted_totals[str(match_id)] = float(total)
+
+        # One grid, one distribution: no convolution, because the target is
+        # already the match total. side_pmf is a function of a count and its
+        # mean, so it serves the total as it serves a side.
+        counts = np.arange(2 * _SIDE_MAX_COUNT - 1)
+        pmf = _side_pmf(mu_total, self.alpha_, counts)
+        over = pmf[:, counts > self.line].sum(axis=1)
+        under = pmf[:, counts <= self.line].sum(axis=1)
+        probabilities = {"over": over, "under": under}
+        return pd.DataFrame(
+            {
+                "match_id": np.repeat(frame["match_id"].to_numpy(), 2),
+                "outcome": np.tile(np.asarray(self.outcomes, dtype=object), len(frame)),
+                "prob": np.column_stack(
+                    [probabilities[outcome] for outcome in self.outcomes]
+                ).ravel(),
+            }
+        )
+
+    def _design(self, rows: pd.DataFrame) -> pd.DataFrame:
+        """Match-level regressors: the two side rates and the referee rate.
+
+        One row per match (never two), because the likelihood is on the match
+        total. The columns are the per-side shrunk rates, so the total mean is
+        the same kind of function of discipline and referee as the convolved
+        model's, and the referee column makes this design a straight swap of the
+        team+referee model's target.
+        """
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return pd.DataFrame(
+                {
+                    "const": np.ones(len(rows), dtype=float),
+                    "log_home_rate": np.log(rows["home_rate"].to_numpy(dtype=float)),
+                    "log_away_rate": np.log(rows["away_rate"].to_numpy(dtype=float)),
+                    "log_ref_rate": np.log(rows["ref_rate"].to_numpy(dtype=float)),
+                }
+            )
+
+    def _mu(self, rows: pd.DataFrame) -> np.ndarray:
+        """Expected *total* cards per match, directly (no per-side split)."""
+        if self._beta is None:
+            raise RuntimeError("predict() called before fit()")
+        design = self._design(rows)
+        finite = np.isfinite(design.to_numpy(dtype=float)).all(axis=1)
+        if not finite.all():
+            bad = rows.loc[~finite, "match_id"].head(3).tolist()
+            raise ValueError(
+                f"cards_total_nbinom got a non-finite feature for match(es) "
+                f"{bad}; build features with add_card_features(df, k) and "
+                "add_referee_feature(df, k)"
+            )
+        return np.exp(design.to_numpy(dtype=float) @ self._beta)
+
+    def __repr__(self) -> str:
+        return (
+            f"<{type(self).__name__} {self.family_name} {self.target_name} "
+            f"line={self.line:g} k={self.k:g}>"
+        )
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -913,6 +1055,7 @@ __all__ = [
     "CardsPoisson",
     "CardsTeamRefNegativeBinomial",
     "CardsTeamRefPoisson",
+    "CardsTotalNegativeBinomial",
     "LeagueAveragePoisson",
     "add_card_features",
     "add_referee_feature",

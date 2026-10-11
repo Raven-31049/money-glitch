@@ -244,6 +244,39 @@ Before declaring any phase done:
 
 ## 9. Change log
 
+- Phase 1 step 3b — total-target negative binomial and the frozen adoption
+  rule. `models/cards_poisson.py` adds `CardsTotalNegativeBinomial`, the one
+  new model step 3b was allowed to build: one row per match, target = match
+  total, design = `const + log home rate + log away rate + log referee rate`
+  (the same k=6 features as `CardsTeamRefPoisson`, so the difference from it is
+  the target and the likelihood, not the information). The dispersion alpha is
+  estimated by the same MLE-on-Poisson-optimum path as step 3 (the stabilising
+  fix), and over/under is read straight off the single negative-binomial pmf of
+  the total (`side_pmf` over counts 0..94) — no convolution, which is exactly
+  the per-side two-step this model does without. Registered as
+  `cards_total_nbinom`. `scripts/phase1_step3b_total_nbinom.py` first measures
+  the home/away card correlation — raw, and the out-of-sample per-side
+  **residual** correlation of the incumbent — per season and overall, then runs
+  incumbent (`poisson_team_ref`) vs challenger (`cards_total_nbinom`) on
+  identical matches and folds (asserted at runtime) across lines 3.5/4.5/5.5
+  and datasets `all`/`no_covid`: Brier, log loss, paired bootstrap (10,000
+  resamples, full sequence), per-line P(over) reliability, the count-frequency
+  table 0..10+, OOS residual dispersion, and the fitted alpha per season. The
+  decision rule was fixed before the run, applied mechanically, and quoted in
+  the report: adopt ONLY IF the challenger's log loss wins ≥2 of 3 lines in
+  BOTH datasets AND its combined L1 tail distance over counts {0,1,2,8,9,10+}
+  is smaller in BOTH datasets. **Result: KEEP `poisson_team_ref`.** The
+  challenger's total-level alpha is genuinely positive (per-season 2e-07–0.04,
+  matching total var/mean 1.0–1.2), so the NB is not degenerate — but it wins
+  log loss on only 1 of 3 lines (`all`) and 0 of 3 (`no_covid`), the bootstrap
+  separates zero in 0 of 6 Brier comparisons, and its tail L1 is worse in both
+  datasets (0.0486 vs 0.0469, 0.0413 vs 0.0385): the extra total dispersion
+  widens the upper tail (10+ predicted 0.0070 vs actual 0.0037) when the actual
+  tail is *thinner* than the incumbent already predicts. The residual
+  home/away correlation stays ~+0.19 (raw +0.196 → residual +0.186), i.e. the
+  incumbent's shared features explain almost none of the home/away dependence,
+  but the total NB's mean-variance form is the wrong tool for it. 13 new tests
+  (492 total).
 - Phase 1 step 3 — negative-binomial card model and the four-model
   comparison. New `models/count_distributions.py` does the one piece of
   arithmetic step 3 adds: the match total is `home + away`, so its pmf is the
