@@ -19,12 +19,15 @@ from .base import (
     supports_samples,
 )
 from .cards_poisson import (
+    CardsNegativeBinomial,
     CardsPoisson,
+    CardsTeamRefNegativeBinomial,
     CardsTeamRefPoisson,
     LeagueAveragePoisson,
     add_card_features,
     add_referee_feature,
 )
+from .count_distributions import SIDE_MAX_COUNT, convolve_rows, side_pmf, total_pmf
 from .naive_frequency import NaiveFrequency
 from .pure_market import PureMarket, devig_long
 
@@ -36,6 +39,8 @@ MODEL_REGISTRY: dict[str, type] = {
     "cards_poisson": CardsPoisson,
     "cards_league_average": LeagueAveragePoisson,
     "cards_team_ref": CardsTeamRefPoisson,
+    "cards_nbinom": CardsNegativeBinomial,
+    "cards_team_ref_nbinom": CardsTeamRefNegativeBinomial,
 }
 
 
@@ -64,7 +69,10 @@ def create_model(
 
 __all__ = [
     "MODEL_REGISTRY",
+    "SIDE_MAX_COUNT",
+    "CardsNegativeBinomial",
     "CardsPoisson",
+    "CardsTeamRefNegativeBinomial",
     "CardsTeamRefPoisson",
     "LeagueAveragePoisson",
     "MarketModel",
@@ -75,7 +83,10 @@ __all__ = [
     "add_card_features",
     "add_referee_feature",
     "check_predictions",
+    "convolve_rows",
     "create_model",
     "devig_long",
+    "side_pmf",
     "supports_samples",
+    "total_pmf",
 ]

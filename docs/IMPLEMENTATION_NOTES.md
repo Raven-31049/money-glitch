@@ -244,6 +244,40 @@ Before declaring any phase done:
 
 ## 9. Change log
 
+- Phase 1 step 3 — negative-binomial card model and the four-model
+  comparison. New `models/count_distributions.py` does the one piece of
+  arithmetic step 3 adds: the match total is `home + away`, so its pmf is the
+  convolution of the two per-side pmfs, built as one cached 0/1-selector matrix
+  product over the batch (`side_pmf`, `convolve_rows`, `total_pmf`,
+  `SIDE_MAX_COUNT = 48`); vectorised, per invariant 6. `models/cards_poisson.py`
+  now predicts every family through that convolution (for Poisson it is the
+  same numbers the old direct cdf produced), records `predicted_sides`
+  (home/away means, not just the total) and the fitted `alpha_`, splits `fit`
+  into `_fit_family`, and adds `_NegativeBinomialFit` plus
+  `CardsNegativeBinomial` / `CardsTeamRefNegativeBinomial` — same designs as
+  their Poisson twins, one likelihood swapped in. **A negative-binomial MLE is
+  started from the Poisson GLM optimum of the same design**: left to its own
+  default start, statsmodels' Newton search diverged on one collinear fold and
+  returned `const = 21`, per-side means in the hundreds and a pmf that lost
+  ~2.5% of its mass; from the Poisson start the search stays on the alpha → 0
+  boundary and reproduces Poisson exactly. Registered as `cards_nbinom` /
+  `cards_team_ref_nbinom`. `scripts/phase1_step3_nbinom.py` runs four models
+  (Poisson team, Poisson team+ref, NB team, NB team+ref) over 2 datasets with a
+  single walk-forward each (the fit does not depend on the line, so all three
+  lines are read off the same total pmf), asserts identical match sets, and
+  reports scores, deltas, a paired NB-vs-Poisson bootstrap (10,000 resamples,
+  fixed seed, full sequence per invariant 3), the predicted-vs-actual count
+  distribution 0..10+, the per-season dispersion, a referee-rate-quintile
+  diagnostic and a fit-health table. **Result: the negative binomial does not
+  fix the tails.** The estimated per-side alpha is ~1e-7 in every season
+  (per-side var/mean 0.91–0.99, i.e. *under*-dispersed), so NB coincides with
+  Poisson (ΔBrier 0.0000; the bootstrap excludes zero in 0 of 12 comparisons),
+  and the predicted-vs-actual tables are unchanged — the total's slight
+  overdispersion (var/mean ~1.0–1.2) comes from the home/away correlation, not
+  from per-side dispersion a per-side NB could capture. The referee term helps
+  across the whole rate range, most for the strictest referees (Q5 ΔBrier
+  −0.0062 vs Q1 −0.0020), unlike step 2's aggregate which hid that gradient.
+  20 new tests (479 total).
 - Phase 1 step 2 — referee variant and comparison. Gate first: load-time
   referee name corrections (`configs/referee_corrections.yaml`, applied by
   `data/ingest.py` — whitespace stripped from text columns, four one-off

@@ -39,7 +39,8 @@ from typing import ClassVar
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-from scipy.stats import poisson
+
+from .count_distributions import total_pmf as _convolved_total_pmf
 
 #: History columns :func:`add_card_features` reads. Nothing else is consulted.
 HISTORY_COLUMNS: tuple[str, ...] = (
@@ -479,6 +480,11 @@ class CardsPoisson:
     uses_team_rates: ClassVar[bool] = True
     uses_referee_rate: ClassVar[bool] = False
 
+    #: Which count likelihood the fit uses. The classes here are Poisson; the
+    #: negative-binomial subclasses relabel it so a report cannot confuse the
+    #: two families that share this design.
+    family_name: ClassVar[str] = "poisson"
+
     #: Feature columns beyond FEATURE_COLUMNS this design needs. The team
     #: model and the baseline need none; the referee variant needs ref_rate,
     #: which add_referee_feature (not add_card_features) produces.
@@ -500,6 +506,15 @@ class CardsPoisson:
         #: model records what it predicted. The runner captures instances from
         #: the model factory to collect these.
         self.predicted_totals: dict[str, float] = {}
+        #: match_id -> (expected home cards, expected away cards). The total
+        #: alone is not enough to rebuild the step-3 distribution: the negative
+        #: binomial total is the convolution of the two sides, so each side's
+        #: own mean is needed, not just their sum.
+        self.predicted_sides: dict[str, tuple[float, float]] = {}
+        #: Dispersion estimated by the fit, or None for the Poisson family.
+        #: NegativeBinomial sets it to its MLE alpha (variance = mu + alpha*mu^2);
+        #: the recruitment (Poisson) family leaves it None, meaning the limit.
+        self.alpha_: float | None = None
         self._beta: np.ndarray | None = None
         #: Last fit's coefficient and standard-error series, indexed by design
         #: column name — kept so coefficient_table() can report the referee
@@ -554,41 +569,67 @@ class CardsPoisson:
                 "dropped for missing cards or features)"
             )
 
+        self._fit_family(design.loc[usable], endog[usable])
+        return self
+
+    def _fit_family(self, design: pd.DataFrame, endog: np.ndarray) -> None:
+        """Estimate the coefficients from a usable design and target.
+
+        Separate from :meth:`fit` so the negative-binomial subclasses change
+        only the likelihood — the design, the rows, the drop rule and every
+        downstream probability are shared. The base implementation is the
+        Poisson GLM; subclasses override this one method.
+
+        ``alpha_`` is set to None here: the Poisson family has no dispersion
+        parameter to estimate, and the convolution treats None as that limit.
+        """
         result = sm.GLM(
-            endog[usable],
-            design.loc[usable],
+            endog,
+            design,
             family=sm.families.Poisson(),
         ).fit()
         self._beta = result.params.to_numpy(dtype=float)
         self._fitted_params = result.params
         self._fitted_bse = result.bse
-        return self
+        self.alpha_ = None
 
     def predict(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Over/under probabilities per match, long form, from the Poisson total."""
+        """Over/under probabilities per match, long form, from the total pmf.
+
+        The match total is home + away, and for the negative-binomial family
+        that total is the *convolution* of the two sides, not a named
+        distribution — see models/count_distributions.py. The Poisson family
+        goes through the same convolution (sums of independent Poissons are
+        Poisson, so it returns the same numbers the direct formula did) so one
+        probability path serves every family.
+        """
         if self._beta is None:
             raise RuntimeError("predict() called before fit()")
         frame = _require_features(df, self.requires_features)
 
-        mu_total = self._mu(_side_rows(frame, "home")) + self._mu(
-            _side_rows(frame, "away")
-        )
+        mu_home = self._mu(_side_rows(frame, "home"))
+        mu_away = self._mu(_side_rows(frame, "away"))
+        mu_total = mu_home + mu_away
         if not np.isfinite(mu_total).all():
             bad = frame.loc[~np.isfinite(mu_total), "match_id"].head(3).tolist()
             raise ValueError(
                 f"cards_poisson produced a non-finite expected total for {bad}"
             )
-        for match_id, value in zip(frame["match_id"], mu_total):
-            self.predicted_totals[str(match_id)] = float(value)
+        for match_id, total, home, away in zip(
+            frame["match_id"], mu_total, mu_home, mu_away
+        ):
+            key = str(match_id)
+            self.predicted_totals[key] = float(total)
+            self.predicted_sides[key] = (float(home), float(away))
 
-        # over means X > line, under means X < line. ceil(line) - 1 is the
-        # largest whole count below the line, so it states the half-line and
-        # the integer-line cases with one expression.
-        under_count = math.ceil(self.line) - 1
-        probabilities = {
-            "over": poisson.sf(under_count, mu_total),
-            "under": poisson.cdf(under_count, mu_total),
-        }
+        counts, pmf = _convolved_total_pmf(mu_home, mu_away, self.alpha_)
+        # over means X > line, under means X <= line — the market's own rule
+        # (markets/cards_totals.py). For the half-lines a config can name there
+        # is no integer on the line, so the two partition the whole pmf and
+        # over + under == the row sum == 1.
+        over = pmf[:, counts > self.line].sum(axis=1)
+        under = pmf[:, counts <= self.line].sum(axis=1)
+        probabilities = {"over": over, "under": under}
         return pd.DataFrame(
             {
                 "match_id": np.repeat(frame["match_id"].to_numpy(), 2),
@@ -668,7 +709,10 @@ class CardsPoisson:
             kind = "team+referee"
         else:
             kind = "team" if self.uses_team_rates else "league-average"
-        return f"<{type(self).__name__} {kind} line={self.line:g} k={self.k:g}>"
+        return (
+            f"<{type(self).__name__} {self.family_name} {kind} "
+            f"line={self.line:g} k={self.k:g}>"
+        )
 
 
 class LeagueAveragePoisson(CardsPoisson):
@@ -701,6 +745,83 @@ class CardsTeamRefPoisson(CardsPoisson):
 
     uses_referee_rate: ClassVar[bool] = True
     requires_features: ClassVar[tuple[str, ...]] = ("ref_rate",)
+
+
+class _NegativeBinomialFit:
+    """Mixin that swaps the Poisson GLM for a negative-binomial MLE.
+
+    statsmodels' discrete :class:`~statsmodels.discrete.discrete_model.NegativeBinomial`
+    estimates the dispersion ``alpha`` from the training rows (variance =
+    mu + alpha * mu**2), so nothing here is tuned: the same design, the same
+    rows and the same folds as the Poisson models feed it, and the only new
+    number is the one the likelihood itself reports. ``alpha_`` is stored for
+    the report; the design coefficients are dropped out of ``params`` because
+    ``alpha`` is not one of them.
+
+    WHY the MLE starts at the Poisson GLM solution: negative binomial nests
+    Poisson (alpha = 0), so the Poisson fit is the natural, well-conditioned
+    starting point for the same design. Left to its own default start,
+    statsmodels' Newton search occasionally diverges on a small or collinear
+    fold and returns a wild coefficient vector (per-side means in the
+    hundreds), which is a numerical failure rather than a result. Starting from
+    the Poisson optimum removes that failure without changing the objective: if
+    the data carries no overdispersion the search stays at alpha = 0 and
+    reproduces Poisson, and if it does the likelihood still moves the
+    coefficients.
+
+    WHY the convolution still matters even though step 3 finds alpha ~ 0: the
+    parameter is estimated by the fit, not assumed, so if a league or season
+    ever carries real per-side overdispersion this class captures it without a
+    code change — the Poisson result is recovered as the alpha -> 0 limit.
+    """
+
+    family_name: ClassVar[str] = "negative-binomial"
+
+    def _fit_family(self, design: pd.DataFrame, endog: np.ndarray) -> None:
+        # The Poisson optimum of the SAME design is the start (see the class
+        # docstring): a numerical initialisation, not a tuned parameter.
+        poisson = sm.GLM(endog, design, family=sm.families.Poisson()).fit()
+        start = np.concatenate([poisson.params.to_numpy(dtype=float), [0.5]])
+        result = sm.NegativeBinomial(endog, design).fit(start_params=start, disp=0)
+        params = result.params
+        if "alpha" not in params.index:
+            raise RuntimeError(
+                "negative-binomial fit returned no alpha parameter; "
+                f"terms were {list(params.index)}"
+            )
+        # The likelihood is maximised on the alpha = 0 boundary whenever the
+        # training rows carry no overdispersion, which is the expected answer
+        # here (per-side counts are not overdispersed). A non-finite alpha is
+        # the same statement numerically; both are recorded as the Poisson
+        # limit, not as a NaN pmf. Any finite positive alpha is used unchanged.
+        # (statsmodels reports converged=False for the boundary optimum even
+        # when the coefficients are healthy, so convergence is not consulted.)
+        raw_alpha = float(params["alpha"])
+        self.alpha_ = raw_alpha if np.isfinite(raw_alpha) and raw_alpha > 0.0 else 0.0
+        self._fitted_params = params.drop("alpha")
+        self._fitted_bse = result.bse.drop("alpha")
+        self._beta = self._fitted_params.to_numpy(dtype=float)
+
+
+class CardsNegativeBinomial(_NegativeBinomialFit, CardsPoisson):
+    """The team model, fitted by negative binomial instead of Poisson.
+
+    Same design and rows as :class:`CardsPoisson` (log own rate, log opponent
+    rate, home flag); the fit estimates the dispersion from the training data.
+    The match total is the convolution of the two per-side negative-binomial
+    pmfs (models/count_distributions.py), which is where any tail improvement
+    over Poisson would show. No parameter is tuned for it.
+    """
+
+
+class CardsTeamRefNegativeBinomial(_NegativeBinomialFit, CardsTeamRefPoisson):
+    """The team+referee design, fitted by negative binomial.
+
+    The design is exactly :class:`CardsTeamRefPoisson`'s — const + log own rate
+    + log opponent rate + log referee rate + home flag — so the only difference
+    from :class:`CardsNegativeBinomial` is the referee column, and the only
+    difference from :class:`CardsTeamRefPoisson` is the count likelihood.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -788,7 +909,9 @@ __all__ = [
     "HISTORY_COLUMNS",
     "REFEREE_FEATURE_COLUMNS",
     "REFEREE_HISTORY_COLUMNS",
+    "CardsNegativeBinomial",
     "CardsPoisson",
+    "CardsTeamRefNegativeBinomial",
     "CardsTeamRefPoisson",
     "LeagueAveragePoisson",
     "add_card_features",
