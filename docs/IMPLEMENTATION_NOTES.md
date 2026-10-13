@@ -153,6 +153,14 @@ default, configurable per league). The engine asserts
 is the resampling unit. Always computed on the full, untruncated sequence. Reports
 state the resampling unit.
 
+**Holdout (fixed at Phase 1 step 3c).** Seasons **2425 and 2526 are the final
+test set**. Every model decision from step 3c onwards — adoption, tuning,
+feature choice, calibration — is made on seasons **1819-2324 only**. The holdout
+is touched once, at the end, when the user asks for a final check; reporting it
+during development is a leak that voids it. This mirrors `AGENTS.md` rule 9 and
+is enforced in `scripts/phase1_step3c_diagnostics.py`, which refuses to load a
+holdout season.
+
 **Honesty rules in reporting.** No ROI conclusion from fewer than ~100 bets without
 an explicit "sample too small" statement. Every report states the bet count, the
 period, the model and code version, and the config hash.
@@ -244,6 +252,35 @@ Before declaring any phase done:
 
 ## 9. Change log
 
+- Phase 1 step 3c — diagnostics only: extreme predictions, P(over) tails and
+  drift, and the frozen holdout. **No model, feature, k or threshold changed.**
+  Added `AGENTS.md` rule 9 and §5 "Holdout": seasons **2425 and 2526 are the
+  final test set**, and from step 3c onward every decision uses **1819-2324
+  only**. `scripts/phase1_step3c_diagnostics.py` loads only 1819-2324 (a guard
+  refuses a holdout season), builds the incumbent's features, runs one
+  walk-forward of `poisson_team_ref`, and reports: extreme groups (bottom 10% /
+  middle 80% / top 10% of predicted total), the ten-decile gradient, group
+  month-of-season composition, a read-only thin-history diagnostic (prior
+  referee/team match counts, strictly-before-date, mirroring the model's
+  grouping — `models/` does not read it), P(over) reliability at lines
+  3.5/4.5/5.5, and per-season and per-month drift. Findings, in the report's own
+  words, **contradicted the premise**: with the holdout removed the high-P(over)
+  bins are *calibrated*, not over-predicted (line 4.5 bin 0.4-0.5 predicts 0.43
+  vs 0.41 actual; line 5.5 over-predicts, line 3.5 under-predicts — the
+  distribution is mis-shaped, not uniformly hot). The dominant effect is a
+  **rising card rate the cumulative history lags**: league mean total climbs
+  3.30→4.32 cards across the seasons, and the newest season (2324) is
+  under-predicted by +0.53 (`all`) / +0.38 (`no_covid`), largest at the season
+  start (Sep `all` +0.70) and reversing late (Apr -0.15, May -0.14). Thin
+  history is **not** what drives the extremes (rare referees ~11% of both the
+  top and middle, only 2.7% of the `all` bottom; low-history teams 3.5-5%
+  throughout). On `all` the bias is a near-uniform under-prediction (8 of 10
+  deciles under by >0.05); on `no_covid` the top over-predicts and the bottom
+  under-predicts. Two fixes are **proposed and frozen, not implemented**: (A)
+  recency-weighted rate history (one half-life) for the team/referee/league
+  sums, and (B) walk-forward affine recalibration `mu' = a + b*mu` refit
+  strictly per fold — each with a pre-registered pass/fail rule on 1819-2324 in
+  both datasets. All 492 tests pass; nothing in `models/` changed.
 - Phase 1 step 3b — total-target negative binomial and the frozen adoption
   rule. `models/cards_poisson.py` adds `CardsTotalNegativeBinomial`, the one
   new model step 3b was allowed to build: one row per match, target = match

@@ -20,6 +20,11 @@ We are building phase by phase. Never build ahead of the current phase.
 7. One model per league. Never pool leagues into one fit unless the task explicitly says so.
 8. The validation engine (backtest, bankroll, bootstrap, calibration, control) is
    market-agnostic. Market-specific logic lives only in markets/ and models/.
+9. HOLDOUT. Seasons 2425 and 2526 are the final test set. From Phase 1 step 3c
+   onward, every model decision — adoption, tuning, feature choice, calibration —
+   uses ONLY seasons 1819-2324. Do not report 2425-2526 results until the user
+   asks for a final check. The holdout is reported once, at the end, not during
+   development; peeking at it is a leak and voids the final test.
 
 ## Working style
 - Never edit or delete a test just to make it pass. If a test seems wrong, stop and explain why.
