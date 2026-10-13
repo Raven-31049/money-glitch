@@ -16,9 +16,13 @@ later.
 uncertainty work of Phase 2. Convention: it returns an ndarray of shape
 ``(n, n_matches, n_outcomes)``, the match axis following ``df``'s rows and the
 outcome axis following the market's ``outcomes`` order, with every draw
-summing to 1 across outcomes. Percentiles computed *from* those draws are
-marginals and are never renormalised to sum to 1 (invariant 5) — that is a
-property of the percentiles, not of the draws they summarise.
+summing to 1 across outcomes. A model that samples several quoted lines in one
+call — the cards totals model draws 3.5/4.5/5.5 together — inserts a line axis
+immediately before the outcome axis, giving ``(n, n_matches, n_lines,
+n_outcomes)``; otherwise the shape is exactly the 3-D one above. Percentiles
+computed *from* those draws are marginals and are never renormalised to sum to
+1 (invariant 5) — that is a property of the percentiles, not of the draws they
+summarise.
 """
 
 from __future__ import annotations

@@ -23,6 +23,7 @@ from .report import (
     render_markdown,
     summarise_simulation,
 )
+from .uncertainty import interval_width, marginal_percentiles
 
 __all__ = [
     "SMALL_SAMPLE_BETS",
@@ -41,7 +42,9 @@ __all__ = [
     "brier_score",
     "config_hash",
     "format_odds_source_summary",
+    "interval_width",
     "log_loss",
+    "marginal_percentiles",
     "odds_source_summary",
     "reliability_table",
     "render_markdown",

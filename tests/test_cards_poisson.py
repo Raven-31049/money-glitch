@@ -26,11 +26,15 @@ import pandas as pd
 import pytest
 
 from bet_engine.backtest import WALK_FORWARD_COLUMNS, walk_forward
+from bet_engine.eval.uncertainty import marginal_percentiles
 from bet_engine.models import (
+    SAMPLE_LINES,
     CardsPoisson,
     CardsTeamRefPoisson,
+    CardsTotalNegativeBinomial,
     LeagueAveragePoisson,
     create_model,
+    supports_samples,
 )
 from bet_engine.models.cards_poisson import (
     add_card_features,
@@ -879,4 +883,207 @@ def test_referee_recency_weights_by_two_half_lives_by_hand():
     assert features.loc["m3", "ref_past_count"] == pytest.approx(0.25)
     assert features.loc["m3", "ref_rate"] == pytest.approx((2.5 + 6 * (10 / 3)) / (0.25 + 6))
     assert features.loc["m3", "ref_rate"] == pytest.approx(3.6)
+
+
+# ---------------------------------------------------------------------------
+# predict_samples (Phase 1 step 4): coefficient + rate uncertainty
+# ---------------------------------------------------------------------------
+
+
+def _sample_ready_frame(
+    n: int = 400, seed: int = 0, k: float = 6.0, league_mean: float = 2.5
+) -> pd.DataFrame:
+    """A well-determined team frame carrying the Gamma sufficient statistics.
+
+    ``home_rate`` is set to the Gamma posterior mean
+    ``(k * league_mean + past_cards) / (k + past_matches)`` — exactly what
+    add_card_features produces — so the samples' rate draws centre on the
+    frame's own rate and the point prediction is the honest target to compare
+    against. Side counts are drawn from those rates, so the fitted slope on the
+    log rate is near 1 and the coefficient covariance is small.
+    """
+    rng = np.random.default_rng(seed)
+    home_matches = rng.uniform(20.0, 60.0, n)
+    away_matches = rng.uniform(20.0, 60.0, n)
+    home_past_cards = rng.uniform(1.0, 4.0, n) * home_matches
+    away_past_cards = rng.uniform(1.0, 4.0, n) * away_matches
+    league_mean_arr = np.full(n, league_mean)
+    home_rate = (k * league_mean_arr + home_past_cards) / (k + home_matches)
+    away_rate = (k * league_mean_arr + away_past_cards) / (k + away_matches)
+    home_cards = rng.poisson(home_rate).astype(float)
+    away_cards = rng.poisson(away_rate).astype(float)
+    return pd.DataFrame(
+        {
+            "match_id": [f"m{i}" for i in range(n)],
+            "league": ["E0"] * n,
+            "date": pd.date_range("2021-08-01", periods=n, freq="D"),
+            "home": [f"h{i}" for i in range(n)],
+            "away": [f"a{i}" for i in range(n)],
+            "home_cards": home_cards,
+            "away_cards": away_cards,
+            "total_cards": home_cards + away_cards,
+            "home_rate": home_rate,
+            "away_rate": away_rate,
+            "league_mean": league_mean_arr,
+            "home_past_cards": home_past_cards,
+            "home_past_matches": home_matches,
+            "away_past_cards": away_past_cards,
+            "away_past_matches": away_matches,
+        }
+    )
+
+
+def _sample_ready_referee_frame(
+    n: int = 500, seed: int = 4, k: float = 6.0, league_mean_total: float = 5.0
+) -> pd.DataFrame:
+    """The team frame plus consistent referee sufficient statistics."""
+    frame = _sample_ready_frame(n=n, seed=seed, k=k)
+    rng = np.random.default_rng(seed + 1)
+    ref_matches = rng.uniform(20.0, 60.0, n)
+    ref_past_cards = rng.uniform(2.0, 8.0, n) * ref_matches
+    league_total_arr = np.full(n, league_mean_total)
+    ref_rate = (k * league_total_arr + ref_past_cards) / (k + ref_matches)
+    total_cards = rng.poisson(ref_rate).astype(float)
+    frame = frame.assign(
+        total_cards=total_cards,
+        ref_rate=ref_rate,
+        ref_past_cards=ref_past_cards,
+        ref_past_count=ref_matches,
+        league_mean_total=league_total_arr,
+    )
+    return frame
+
+
+def test_predict_samples_returns_the_documented_shape():
+    frame = _sample_ready_frame(60)
+    model = CardsPoisson(OUTCOMES, line=4.5, k=6.0).fit(frame)
+
+    samples = model.predict_samples(frame, n=250, seed=3)
+
+    assert samples.shape == (250, len(frame), len(SAMPLE_LINES), len(OUTCOMES))
+    # Every draw is a distribution over outcomes: over + under == 1 within a draw.
+    assert np.allclose(samples.sum(axis=-1), 1.0)
+    assert samples.min() >= 0.0 and samples.max() <= 1.0
+
+
+def test_predict_samples_uses_the_market_outcome_order():
+    """The outcome axis follows the model's own outcome order, not alphabetical:
+    swapping the declared outcomes swaps which axis index holds "over"."""
+    frame = _sample_ready_frame(40)
+    over_first = CardsPoisson(("over", "under"), line=4.5, k=6.0).fit(frame)
+    under_first = CardsPoisson(("under", "over"), line=4.5, k=6.0).fit(frame)
+
+    a = over_first.predict_samples(frame, n=50, seed=1)
+    b = under_first.predict_samples(frame, n=50, seed=1)
+
+    assert np.allclose(a[..., 0], b[..., 1])  # over in a == over in b
+    assert np.allclose(a[..., 1], b[..., 0])  # under in a == under in b
+
+
+def test_predict_samples_mean_tracks_the_point_prediction():
+    """With a well-determined fit the Monte-Carlo mean must land near the point
+    estimate at the model's own line — the 'percentile sanity' check."""
+    frame = _sample_ready_frame(600)
+    model = CardsPoisson(OUTCOMES, line=4.5, k=6.0).fit(frame)
+
+    samples = model.predict_samples(frame, n=3000, seed=11)
+    point = (
+        model.predict(frame)
+        .pivot(index="match_id", columns="outcome", values="prob")
+        .loc[[f"m{i}" for i in range(len(frame))], "over"]
+        .to_numpy()
+    )
+    # middle line is 4.5, the model's own line.
+    middle = SAMPLE_LINES.index(4.5)
+    sample_mean = samples[:, :, middle, 0].mean(axis=0)
+
+    assert np.allclose(sample_mean, point, atol=0.02)
+
+
+def test_predict_samples_over_falls_with_the_line_in_every_draw():
+    frame = _sample_ready_frame(80)
+    model = CardsPoisson(OUTCOMES, line=4.5, k=6.0).fit(frame)
+
+    samples = model.predict_samples(frame, n=200, seed=5)
+
+    over = samples[..., 0]  # (n, m, lines)
+    assert np.all(over[:, :, 0] > over[:, :, 1])
+    assert np.all(over[:, :, 1] > over[:, :, 2])
+
+
+def test_predict_samples_is_reproducible_for_a_fixed_seed():
+    frame = _sample_ready_frame(50)
+    model = CardsPoisson(OUTCOMES, line=4.5, k=6.0).fit(frame)
+
+    first = model.predict_samples(frame, n=100, seed=99)
+    again = model.predict_samples(frame, n=100, seed=99)
+    other = model.predict_samples(frame, n=100, seed=100)
+
+    assert np.array_equal(first, again)
+    assert not np.array_equal(first, other)
+
+
+def test_predict_samples_refuses_a_frame_without_the_sufficient_statistics():
+    frame = _sample_ready_frame(40)
+    model = CardsPoisson(OUTCOMES, line=4.5, k=6.0).fit(frame)
+    stripped = frame.drop(columns=["home_past_cards"])
+
+    with pytest.raises(ValueError) as exc:
+        model.predict_samples(stripped, n=10)
+
+    assert "home_past_cards" in str(exc.value)
+
+
+def test_predict_samples_needs_a_fit_first():
+    frame = _sample_ready_frame(20)
+
+    with pytest.raises(RuntimeError, match="before fit"):
+        CardsPoisson(OUTCOMES, line=4.5, k=6.0).predict_samples(frame, n=10)
+
+
+def test_predict_samples_rejects_a_bad_draw_count():
+    frame = _sample_ready_frame(20)
+    model = CardsPoisson(OUTCOMES, line=4.5, k=6.0).fit(frame)
+
+    with pytest.raises(ValueError, match="n must be"):
+        model.predict_samples(frame, n=0)
+
+
+def test_the_referee_model_samples_from_the_referee_history():
+    features = _referee_features().iloc[2:]
+    model = CardsTeamRefPoisson(OUTCOMES, line=4.5, k=6.0).fit(features)
+
+    samples = model.predict_samples(features, n=100, seed=2)
+
+    assert samples.shape == (100, len(features), len(SAMPLE_LINES), len(OUTCOMES))
+    assert np.allclose(samples.sum(axis=-1), 1.0)
+
+
+def test_the_total_nbinom_model_samples_from_its_own_design():
+    frame = _sample_ready_referee_frame()
+    model = CardsTotalNegativeBinomial(OUTCOMES, line=4.5, k=6.0).fit(frame)
+
+    samples = model.predict_samples(frame, n=100, seed=2)
+
+    assert samples.shape == (100, len(frame), len(SAMPLE_LINES), len(OUTCOMES))
+    assert np.allclose(samples.sum(axis=-1), 1.0)
+
+
+def test_supports_samples_is_true_for_every_cards_model():
+    assert supports_samples(CardsPoisson(OUTCOMES, line=4.5))
+    assert supports_samples(CardsTeamRefPoisson(OUTCOMES, line=4.5))
+    assert supports_samples(CardsTotalNegativeBinomial(OUTCOMES, line=4.5))
+
+
+def test_percentiles_of_the_draws_are_marginals_not_renormalised():
+    """The samples feed marginal_percentiles directly; the outcome-axis sums of
+    the 10th percentiles are not forced to 1 (invariant 5)."""
+    frame = _sample_ready_frame(120)
+    model = CardsPoisson(OUTCOMES, line=4.5, k=6.0).fit(frame)
+
+    samples = model.predict_samples(frame, n=1000, seed=8)
+    margins = marginal_percentiles(samples, [10, 50, 90])
+
+    lows = margins[0]  # (m, lines, outcomes)
+    assert not np.allclose(lows.sum(axis=-1), 1.0)
 

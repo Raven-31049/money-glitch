@@ -183,6 +183,8 @@ per-side means and asserts both the line-4.5 reconstruction and
 P(over 3.5) > P(over 4.5) > P(over 5.5) on every match. Any future per-line
 reliability readout must do the same.
 
+**Uncertainty is sampled, not assumed (Phase 1 step 4).** `CardsPoisson.predict_samples(df, n, *, lines, seed)` draws the model's own posterior uncertainty in one fit: the design coefficients from `N(beta, cov)` (covariance from the GLM's `cov_params`; the NB fit drops the alpha row/column) and each team/referee rate from its Gamma posterior (`shape = k*prior_mean + past_cards`, `rate = k + past_matches` — the same sufficient statistics the shrinkage already uses, so the posterior mean equals the shrunk point rate). Each draw is a valid over/under distribution (`poisson.sf` for Poisson, the convolved NB pmf otherwise), and a full call returns `(n, len(df), len(lines), n_outcomes)` — a line axis inserted before the outcome axis (the base contract's `(n, n_matches, n_outcomes)` otherwise). The coefficient-draw covariance is symmetrised with negative eigenvalues clipped and `nan_to_num`, so a rank-deficient fold (or a NB fit with no covariance) degrades to a point draw rather than raising. **Percentiles taken from these draws are marginals and are never renormalised across outcomes** (invariant 5): the 10th percentile of P(over) and of P(under) are read independently and can both be small for one uncertain match. `eval/uncertainty.py::marginal_percentiles` computes them (per-outcome, no renormalisation) and a test fails if that ever changes. `scripts/phase1_step4_uncertainty.py` runs it over a full walk-forward and reports interval widths, width drivers, width-band calibration and timing.
+
 **Honesty rules in reporting.** No ROI conclusion from fewer than ~100 bets without
 an explicit "sample too small" statement. Every report states the bet count, the
 period, the model and code version, and the config hash.
@@ -274,6 +276,51 @@ Before declaring any phase done:
 
 ## 9. Change log
 
+- Phase 1 step 4 — uncertainty for the adopted cards model. Holdout unchanged
+  (`AGENTS.md` rule 9): everything is measured on **1819-2324 only** in both
+  datasets, and the script refuses a holdout season by name.
+  **(1) Adopted model as config.** `configs/phase1_cards.yaml` is the single
+  source every later step loads: registry type `cards_team_ref`, `k=6`, `line=4.5`
+  and `model.params.half_life_days=365`. `half_life_days` is a *feature-build*
+  parameter, so the loader pops it and passes it to `add_card_features` /
+  `add_referee_feature` before `create_model` sees `params`; a test pins that the
+  feature parameter never reaches the constructor. `scripts/phase1_step4_uncertainty.py`
+  loads this file rather than re-stating the recipe.
+  **(2) `predict_samples`.** New on the cards models: a single fit yields draws of
+  the design coefficients from `N(beta, cov)` **and** of every team/referee rate
+  from its Gamma posterior (`shape = k*prior_mean + past_cards`,
+  `rate = k + past_matches`; the posterior mean equals the shrunk point rate).
+  This required the rate sufficient statistics in the feature frame —
+  `add_card_features` now also emits `home_past_cards`/`home_past_matches`/
+  `away_past_cards`/`away_past_matches`, and `add_referee_feature` emits
+  `ref_past_cards`/`league_mean_total` (`REFEREE_FEATURE_COLUMNS` extended), all
+  under the same recency weights. Full-call shape is
+  `(n, len(df), len(lines), n_outcomes)` (a line axis before the outcome axis);
+  `CardsTotalNegativeBinomial` overrides it for its single total design. The
+  coefficient covariance is taken from the GLM `cov_params` (NB drops alpha);
+  eigendecomposition with clipped negative eigenvalues makes a rank-deficient
+  fold degrade to a point draw instead of raising, and a NB fit with no
+  covariance at all falls back to a zero covariance. Helper
+  `eval/uncertainty.py::marginal_percentiles` (and `interval_width`) returns
+  per-outcome percentiles and **never renormalises** them (invariant 5); a test
+  fails if it does.
+  **(3) Diagnostics.** One walk-forward of the config's model per dataset
+  (2200 `all` / 1728 `no_covid` scored matches, 1000 draws/fold, sampling 3.2s /
+  3.0s). Mean [10, 90] P(over) width at line 4.5 is 0.155 (`all`) / 0.170
+  (`no_covid`), widening to ~0.21–0.23 for a rare referee (<10 prior) or a
+  low-history team; width correlates −0.50 / −0.30 with the referee's and thinner
+  team's prior counts (`all`) and −0.52 / −0.38 (`no_covid`) — less history,
+  wider interval, the expected direction. Width bands (line 4.5) rise in MAE from
+  ~0.33 (narrowest) to ~0.46 (widest), so the interval tracks where the model is
+  less sure. Monte-Carlo sample means track the point estimates (mean gap ≤0.003,
+  max abs gap ≤0.06 at 1000 draws). The per-line P(over) reliability tables are
+  reproduced (each line rebuilt from its own pmf);
+  residual miscalibration remains at line 5.5 (`no_covid` bin 0.3-0.4 predicts
+  0.33 vs 0.20 actual) and line 3.5 (`all` bin 0.2-0.3 predicts 0.27 vs 0.34).
+  No model, feature, threshold or percentile is changed — step 4 measures the
+  uncertainty, it does not consume it. 5 new tests in `tests/test_uncertainty.py`,
+  12 in `tests/test_cards_poisson.py`, 8 in `tests/test_step4_uncertainty.py`;
+  full suite green.
 - Phase 1 step 3c — diagnostics, a reliability bug fix, and Fix A adopted.
   The holdout rule (`AGENTS.md` rule 9, §5) is unchanged: every decision here
   uses **1819-2324 only** in both datasets.

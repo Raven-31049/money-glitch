@@ -39,6 +39,7 @@ from typing import ClassVar
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+from scipy.stats import poisson
 
 from .count_distributions import SIDE_MAX_COUNT as _SIDE_MAX_COUNT
 from .count_distributions import side_pmf as _side_pmf
@@ -73,9 +74,42 @@ FEATURE_COLUMNS: tuple[str, ...] = (
 )
 
 #: Columns produced by :func:`add_referee_feature`. Only ``ref_rate`` is a
-#: model input; ``ref_past_count`` rides along so reports can count matches
-#: whose referee had little or no history without recomputing it.
-REFEREE_FEATURE_COLUMNS: tuple[str, ...] = ("ref_rate", "ref_past_count")
+#: model input; ``ref_past_count``, ``ref_past_cards`` and ``league_mean_total``
+#: ride along as the referee Gamma posterior's sufficient statistics and so
+#: reports can count matches officiated by a low-history referee without
+#: recomputing them (Phase 1 step 4).
+REFEREE_FEATURE_COLUMNS: tuple[str, ...] = (
+    "ref_rate",
+    "ref_past_count",
+    "ref_past_cards",
+    "league_mean_total",
+)
+
+#: The team-rate Gamma posterior's sufficient statistics, produced by
+#: :func:`add_card_features` (Phase 1 step 4). shape = k*league_mean +
+#: past_cards, rate = k + past_matches for each side.
+SAMPLE_TEAM_COLUMNS: tuple[str, ...] = (
+    "home_past_cards",
+    "home_past_matches",
+    "away_past_cards",
+    "away_past_matches",
+    "league_mean",
+)
+
+#: The over/under lines the sampling diagnostics are quoted at (Phase 1 step 4).
+#: The market's quoted half-lines; half-lines never sit on an integer, so over
+#: and under partition the pmf exactly.
+SAMPLE_LINES: tuple[float, ...] = (3.5, 4.5, 5.5)
+
+#: Default draw count and the fixed seed for :meth:`CardsPoisson.predict_samples`.
+#: A fixed seed makes a report reproducible; the count is the task's default.
+SAMPLE_DRAWS: int = 1000
+SAMPLE_SEED: int = 20260101
+
+#: Rows of the flattened (draw x match) batch convolved at a time in the
+#: negative-binomial sampling path, so the two-side convolution never
+#: materialises a grid as large as draws x matches x SIDE_MAX_COUNT**2.
+_SAMPLE_CHUNK: int = 4096
 
 #: The features the causality probe watches. The ``*_cards`` targets are
 #: deliberately absent: perturbing a date *must* change that date's card
@@ -132,6 +166,12 @@ def add_card_features(
     runtime assertion — the same shape as the walk-forward leak check. The probe
     is bound to the same ``half_life_days`` the features were built with, so a
     recency build is checked, not an unweighted one.
+
+    Alongside the rates it emits the Gamma posterior's sufficient statistics
+    (``home_past_cards``/``home_past_matches``/``away_past_cards``/
+    ``away_past_matches``, with ``league_mean``), so
+    :meth:`CardsPoisson.predict_samples` can draw each side's rate from the same
+    history the point estimate used instead of re-deriving it.
     """
     _positive_float("k", k)
     if half_life_days is not None:
@@ -243,11 +283,25 @@ def _add_card_features(
         merged["past_count"] + k
     )
 
-    home_rate = merged.loc[merged["side"] == "home"].set_index("match_id")["rate"]
-    away_rate = merged.loc[merged["side"] == "away"].set_index("match_id")["rate"]
-    out["home_rate"] = out["match_id"].map(home_rate).astype("float64")
-    out["away_rate"] = out["match_id"].map(away_rate).astype("float64")
+    home = merged.loc[merged["side"] == "home"].set_index("match_id")
+    away = merged.loc[merged["side"] == "away"].set_index("match_id")
+    out["home_rate"] = out["match_id"].map(home["rate"]).astype("float64")
+    out["away_rate"] = out["match_id"].map(away["rate"]).astype("float64")
     out["league_mean"] = out["date"].map(league_mean).astype("float64")
+    # Sufficient statistics for the Gamma posterior on each side's rate
+    # (Phase 1 step 4): the strictly-earlier card sum and match count behind the
+    # rate, with the same recency weights. shape = k*league_mean + past_cards,
+    # rate = k + past_matches, so the posterior mean is exactly the shrunk rate
+    # already in home_rate/away_rate. Exposed as columns so the model samples the
+    # rate it actually used without re-deriving the history.
+    out["home_past_cards"] = out["match_id"].map(home["past_sum"]).astype("float64")
+    out["home_past_matches"] = (
+        out["match_id"].map(home["past_count"]).astype("float64")
+    )
+    out["away_past_cards"] = out["match_id"].map(away["past_sum"]).astype("float64")
+    out["away_past_matches"] = (
+        out["match_id"].map(away["past_count"]).astype("float64")
+    )
     return out
 
 
@@ -284,7 +338,9 @@ def add_referee_feature(
     alongside the rate so reports can count matches officiated by a referee
     with little history — a model's referee column is only as good as the
     sample behind it. Under recency it is the *effective* (decayed) count, not
-    an integer.
+    an integer. ``ref_past_cards`` and ``league_mean_total`` join it as the
+    Gamma posterior's sufficient statistics for :meth:`CardsPoisson.predict_samples`
+    (shape = k*league_mean_total + ref_past_cards, rate = k + ref_past_count).
 
     ``verify`` runs the same causality probe as :func:`add_card_features`, on
     the referee columns, bound to the same ``half_life_days``.
@@ -397,6 +453,18 @@ def _add_referee_feature(
     out["ref_past_count"] = (
         out["match_id"]
         .map(merged.set_index("match_id")["past_count"])
+        .astype("float64")
+    )
+    # Sufficient statistics for the Gamma posterior on the referee rate
+    # (Phase 1 step 4): past_cards is the decayed card total behind ref_rate and
+    # league_mean_total is the per-match prior it shrinks toward, so
+    # shape = k*league_mean_total + ref_past_cards, rate = k + ref_past_count.
+    out["ref_past_cards"] = (
+        out["match_id"].map(merged.set_index("match_id")["past_sum"]).astype("float64")
+    )
+    out["league_mean_total"] = (
+        out["match_id"]
+        .map(merged.set_index("match_id")["league_mean_total"])
         .astype("float64")
     )
     return out
@@ -649,6 +717,11 @@ class CardsPoisson:
         #: the recruitment (Poisson) family leaves it None, meaning the limit.
         self.alpha_: float | None = None
         self._beta: np.ndarray | None = None
+        #: Covariance of the fitted coefficients (rows/cols the design's own
+        #: terms, alpha excluded for the negative binomial). The coefficient half
+        #: of predict_samples' uncertainty: draws come from a multivariate normal
+        #: with this covariance around _beta. None before fit.
+        self._cov: np.ndarray | None = None
         #: Last fit's coefficient and standard-error series, indexed by design
         #: column name — kept so coefficient_table() can report the referee
         #: coefficient with an interval instead of only the point estimate.
@@ -724,6 +797,13 @@ class CardsPoisson:
         self._beta = result.params.to_numpy(dtype=float)
         self._fitted_params = result.params
         self._fitted_bse = result.bse
+        # cov_params() is the GLM's own coefficient covariance; row/col order
+        # matches params, so predict_samples can draw coefficients from
+        # N(beta, cov) without any further bookkeeping.
+        self._cov = np.asarray(
+            result.cov_params().loc[self._fitted_params.index, self._fitted_params.index],
+            dtype=float,
+        )
         self.alpha_ = None
 
     def predict(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -772,6 +852,224 @@ class CardsPoisson:
                 ).ravel(),
             }
         )
+
+    def predict_samples(
+        self,
+        df: pd.DataFrame,
+        n: int = SAMPLE_DRAWS,
+        *,
+        lines: Sequence[float] = SAMPLE_LINES,
+        seed: int | None = SAMPLE_SEED,
+    ) -> np.ndarray:
+        """Draw ``n`` joint samples of P(over)/P(under) at each of ``lines``.
+
+        Uncertainty comes from a single fit — nothing is refitted and nothing is
+        bootstrapped — by drawing the two parameters the fit is genuinely unsure
+        about and propagating them together:
+
+        * **coefficients** from ``N(beta, cov)``, the GLM's own covariance (the
+          coefficient half of ``coefficient_table``'s interval);
+        * **team and referee rates** from their Gamma posteriors. Each rate is a
+          Gamma prior of mean ``league_mean`` (per side) or ``league_mean_total``
+          (referee) and weight ``k`` pseudo-matches updated by the strictly
+          earlier, recency-weighted card sums, so ``shape = k*prior + past_cards``
+          and ``rate = k + past_matches`` — the same shrinkage ``add_card_features``
+          already applied, now carried as a distribution. Its mean is exactly the
+          point rate, so a larger posterior (more history) draws tighter.
+
+        Returns an array of shape ``(n, len(df), len(lines), n_outcomes)``: the
+        draw axis, the match axis (following ``df``'s rows), the line axis, and
+        the market's ``outcomes`` order. Every draw sums to 1 across outcomes.
+        The percentiles taken *from* those draws by callers are marginals and
+        are never renormalised across outcomes (invariant 5) — see
+        :mod:`bet_engine.eval.uncertainty`.
+
+        A fixed ``seed`` (the default) makes a report reproducible; pass
+        ``seed=None`` for fresh entropy.
+        """
+        if self._beta is None or self._cov is None:
+            raise RuntimeError("predict_samples() called before fit()")
+        draws = _positive_int("n", n)
+        line_labels = tuple(_positive_float("line", line) for line in lines)
+        if not line_labels:
+            raise ValueError("predict_samples needs at least one line")
+        frame = _require_features(df, (*self.requires_features, *self._sample_columns()))
+
+        rng = np.random.default_rng(seed)
+        beta = self._coefficient_draws(rng, draws)
+        mu_home, mu_away = self._sampled_mus(frame, beta, rng, draws)
+        over = self._over_probabilities(mu_home, mu_away, line_labels)
+
+        # Every draw is a full distribution over the two outcomes (over + under
+        # = 1 within a draw). The *percentiles* callers take across draws are
+        # marginals and are never renormalised — invariant 5.
+        by_outcome = {"over": over, "under": 1.0 - over}
+        return np.stack([by_outcome[outcome] for outcome in self.outcomes], axis=-1)
+
+    def _sample_columns(self) -> tuple[str, ...]:
+        """Feature columns :meth:`predict_samples` needs beyond the design's."""
+        columns: list[str] = []
+        if self.uses_team_rates:
+            columns.extend(SAMPLE_TEAM_COLUMNS)
+        if self.uses_referee_rate:
+            columns.extend(("ref_past_cards", "ref_past_count", "league_mean_total"))
+        return tuple(columns)
+
+    def _coefficient_draws(self, rng: np.random.Generator, draws: int) -> np.ndarray:
+        """``(draws, n_terms)`` coefficient draws from N(beta, cov).
+
+        Uses an eigendecomposition with negative eigenvalues clipped to zero
+        rather than ``rng.multivariate_normal``: a rank-deficient fold (the
+        small/collinear cases the walk-forward already meets) yields a
+        numerically semi-definite covariance that the direct sampler would warn
+        about or reject, while the clipped square root stays a valid, finite
+        draw. Non-finite covariance entries (a degenerate fit) become zero, so
+        that coefficient simply does not move across draws.
+        """
+        cov = np.nan_to_num(
+            np.asarray(self._cov, dtype=float), nan=0.0, posinf=0.0, neginf=0.0
+        )
+        cov = 0.5 * (cov + cov.T)
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)
+        root = eigenvectors * np.sqrt(np.clip(eigenvalues, 0.0, None))
+        noise = rng.standard_normal((draws, self._beta.shape[0]))
+        return self._beta[None, :] + noise @ root.T
+
+    def _gamma_rate_draws(
+        self,
+        rng: np.random.Generator,
+        prior_mean: np.ndarray,
+        past_cards: np.ndarray,
+        past_matches: np.ndarray,
+        draws: int,
+    ) -> np.ndarray:
+        """``(draws, n_matches)`` draws of a shrunk rate from its Gamma posterior.
+
+        ``shape = k*prior_mean + past_cards`` and ``rate = k + past_matches``,
+        recency weights already folded into both sums, so the posterior mean is
+        the shrunk rate itself. Vectorised over matches and draws in one
+        ``rng.gamma`` call — no per-match loop.
+        """
+        shape = self.k * prior_mean + past_cards
+        rate = self.k + past_matches
+        bad = (
+            ~np.isfinite(shape) | ~np.isfinite(rate) | (shape <= 0.0) | (rate <= 0.0)
+        )
+        if bad.any():
+            raise ValueError(
+                "predict_samples got a non-positive or non-finite Gamma "
+                f"posterior for {int(bad.sum())} match(es); build features with "
+                "add_card_features/add_referee_feature so the sufficient "
+                "statistics exist"
+            )
+        return rng.gamma(shape[None, :], 1.0 / rate[None, :], size=(draws, len(shape)))
+
+    def _sampled_mus(
+        self,
+        frame: pd.DataFrame,
+        beta: np.ndarray,
+        rng: np.random.Generator,
+        draws: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Per-draw expected home and away cards, shape ``(draws, n_matches)``."""
+        home_rate = away_rate = ref_rate = None
+        if self.uses_team_rates:
+            home_rate = self._gamma_rate_draws(
+                rng,
+                frame["league_mean"].to_numpy(dtype=float),
+                frame["home_past_cards"].to_numpy(dtype=float),
+                frame["home_past_matches"].to_numpy(dtype=float),
+                draws,
+            )
+            away_rate = self._gamma_rate_draws(
+                rng,
+                frame["league_mean"].to_numpy(dtype=float),
+                frame["away_past_cards"].to_numpy(dtype=float),
+                frame["away_past_matches"].to_numpy(dtype=float),
+                draws,
+            )
+        if self.uses_referee_rate:
+            ref_rate = self._gamma_rate_draws(
+                rng,
+                frame["league_mean_total"].to_numpy(dtype=float),
+                frame["ref_past_cards"].to_numpy(dtype=float),
+                frame["ref_past_count"].to_numpy(dtype=float),
+                draws,
+            )
+        mu_home = self._design_mu(
+            beta, len(frame), home_rate, away_rate, ref_rate, 1.0
+        )
+        mu_away = self._design_mu(
+            beta, len(frame), away_rate, home_rate, ref_rate, 0.0
+        )
+        return mu_home, mu_away
+
+    def _design_mu(
+        self,
+        beta: np.ndarray,
+        n_matches: int,
+        own_rate: np.ndarray | None,
+        opp_rate: np.ndarray | None,
+        ref_rate: np.ndarray | None,
+        home_flag: float,
+    ) -> np.ndarray:
+        """``exp(X beta)`` for one side's rows, X built per term and vectorised.
+
+        ``beta`` is ``(draws, n_terms)`` and the rate arrays are
+        ``(draws, n_matches)``; the result is ``(draws, n_matches)``. Terms come
+        from the fitted design's own names, so the same code serves the team,
+        league-average and referee designs without a branch per model — the
+        league-average design has no rate column, so the rates are unused.
+        """
+        assert self._fitted_params is not None
+        mu = np.zeros((beta.shape[0], n_matches))
+        for position, term in enumerate(self._fitted_params.index):
+            coefficient = beta[:, position][:, None]
+            if term == "const":
+                column = 1.0
+            elif term == "log_own_rate":
+                column = np.log(own_rate)
+            elif term == "log_opp_rate":
+                column = np.log(opp_rate)
+            elif term == "log_ref_rate":
+                column = np.log(ref_rate)
+            elif term == "home_flag":
+                column = home_flag
+            else:  # pragma: no cover - the design's names are a closed set
+                raise ValueError(f"unexpected design term {term!r} in predict_samples")
+            mu = mu + coefficient * column
+        return np.exp(mu)
+
+    def _over_probabilities(
+        self, mu_home: np.ndarray, mu_away: np.ndarray, lines: tuple[float, ...]
+    ) -> np.ndarray:
+        """``(draws, n_matches, n_lines)`` P(total > line) for each draw and line.
+
+        The Poisson total is Poisson(mu_home + mu_away) (sums of independent
+        Poissons), read analytically with the survival function — no grid. The
+        negative-binomial total is the convolution of the two side pmfs, so it
+        goes through :func:`~bet_engine.models.count_distributions.total_pmf`
+        on flattened (draw x match) rows, in chunks, with a Python loop over the
+        handful of lines but never over a grid cell.
+        """
+        if self.alpha_ is None or self.alpha_ <= 0.0:
+            total = mu_home + mu_away
+            return np.stack(
+                [poisson.sf(np.floor(line), total) for line in lines], axis=-1
+            )
+
+        shape = mu_home.shape
+        flat_home = mu_home.reshape(-1)
+        flat_away = mu_away.reshape(-1)
+        over = np.empty((flat_home.size, len(lines)), dtype=float)
+        for start in range(0, flat_home.size, _SAMPLE_CHUNK):
+            stop = start + _SAMPLE_CHUNK
+            counts, pmf = _convolved_total_pmf(
+                flat_home[start:stop], flat_away[start:stop], self.alpha_
+            )
+            for position, line in enumerate(lines):
+                over[start:stop, position] = pmf[:, counts > line].sum(axis=1)
+        return over.reshape(shape + (len(lines),))
 
     def _design(self, rows: pd.DataFrame) -> pd.DataFrame:
         """Regressor matrix. The baseline drops the rate columns, nothing else.
@@ -932,8 +1230,28 @@ class _NegativeBinomialFit:
         raw_alpha = float(params["alpha"])
         self.alpha_ = raw_alpha if np.isfinite(raw_alpha) and raw_alpha > 0.0 else 0.0
         self._fitted_params = params.drop("alpha")
-        self._fitted_bse = result.bse.drop("alpha")
         self._beta = self._fitted_params.to_numpy(dtype=float)
+        # Drop alpha's row/column: predict_samples draws the design
+        # coefficients only, and alpha is handled by its own convolution.
+        # A degenerate fold (rank-deficient design, e.g. a tiny training
+        # window) can leave statsmodels with no covariance at all; that is not
+        # a reason to fail the fit, so fall back to a point (zero) covariance —
+        # predict_samples then reports coefficient uncertainty as zero for the
+        # affected fold rather than raising.
+        try:
+            self._fitted_bse = result.bse.drop("alpha")
+            cov = result.cov_params()
+            self._cov = np.asarray(
+                cov.loc[self._fitted_params.index, self._fitted_params.index],
+                dtype=float,
+            )
+        except (ValueError, np.linalg.LinAlgError):
+            self._fitted_bse = pd.Series(
+                np.nan, index=self._fitted_params.index, dtype=float
+            )
+            self._cov = np.zeros(
+                (len(self._fitted_params), len(self._fitted_params)), dtype=float
+            )
 
 
 class CardsNegativeBinomial(_NegativeBinomialFit, CardsPoisson):
@@ -1090,6 +1408,79 @@ class CardsTotalNegativeBinomial(_NegativeBinomialFit, CardsPoisson):
             )
         return np.exp(design.to_numpy(dtype=float) @ self._beta)
 
+    def predict_samples(
+        self,
+        df: pd.DataFrame,
+        n: int = SAMPLE_DRAWS,
+        *,
+        lines: Sequence[float] = SAMPLE_LINES,
+        seed: int | None = SAMPLE_SEED,
+    ) -> np.ndarray:
+        """Draw ``n`` samples of P(over)/P(under) for the *total* design.
+
+        Same two uncertainty sources as the side models (coefficients from
+        N(beta, cov), the three rates from their Gamma posteriors), but the
+        single match-level total mean ``exp(X beta)`` feeds one negative-binomial
+        count pmf per draw instead of two convolved sides. Return shape matches
+        the side models: ``(n, len(df), len(lines), n_outcomes)``.
+        """
+        if self._beta is None or self._cov is None:
+            raise RuntimeError("predict_samples() called before fit()")
+        draws = _positive_int("n", n)
+        line_labels = tuple(_positive_float("line", line) for line in lines)
+        if not line_labels:
+            raise ValueError("predict_samples needs at least one line")
+        frame = _require_features(df, (*self.requires_features, *self._sample_columns()))
+
+        rng = np.random.default_rng(seed)
+        beta = self._coefficient_draws(rng, draws)
+        prior = frame["league_mean"].to_numpy(dtype=float)
+        total_prior = frame["league_mean_total"].to_numpy(dtype=float)
+        home_rate = self._gamma_rate_draws(
+            rng, prior,
+            frame["home_past_cards"].to_numpy(dtype=float),
+            frame["home_past_matches"].to_numpy(dtype=float), draws,
+        )
+        away_rate = self._gamma_rate_draws(
+            rng, prior,
+            frame["away_past_cards"].to_numpy(dtype=float),
+            frame["away_past_matches"].to_numpy(dtype=float), draws,
+        )
+        ref_rate = self._gamma_rate_draws(
+            rng, total_prior,
+            frame["ref_past_cards"].to_numpy(dtype=float),
+            frame["ref_past_count"].to_numpy(dtype=float), draws,
+        )
+
+        assert self._fitted_params is not None
+        mu_total = np.zeros((draws, len(frame)))
+        for position, term in enumerate(self._fitted_params.index):
+            coefficient = beta[:, position][:, None]
+            if term == "const":
+                column = 1.0
+            elif term == "log_home_rate":
+                column = np.log(home_rate)
+            elif term == "log_away_rate":
+                column = np.log(away_rate)
+            elif term == "log_ref_rate":
+                column = np.log(ref_rate)
+            else:  # pragma: no cover - the design's names are a closed set
+                raise ValueError(f"unexpected design term {term!r} in predict_samples")
+            mu_total = mu_total + coefficient * column
+        mu_total = np.exp(mu_total)
+
+        counts = np.arange(2 * _SIDE_MAX_COUNT - 1)
+        flat = mu_total.reshape(-1)
+        over = np.empty((flat.size, len(line_labels)), dtype=float)
+        for start in range(0, flat.size, _SAMPLE_CHUNK):
+            stop = start + _SAMPLE_CHUNK
+            pmf = _side_pmf(flat[start:stop], self.alpha_, counts)
+            for position, line in enumerate(line_labels):
+                over[start:stop, position] = pmf[:, counts > line].sum(axis=1)
+        over = over.reshape(mu_total.shape + (len(line_labels),))
+        by_outcome = {"over": over, "under": 1.0 - over}
+        return np.stack([by_outcome[outcome] for outcome in self.outcomes], axis=-1)
+
     def __repr__(self) -> str:
         return (
             f"<{type(self).__name__} {self.family_name} {self.target_name} "
@@ -1161,6 +1552,13 @@ def _require_columns(df: pd.DataFrame, columns: Sequence[str]) -> None:
         raise ValueError(f"frame is missing column(s) {missing}; have {list(df.columns)}")
 
 
+def _positive_int(name: str, value: object) -> int:
+    """A draw count: an integer >= 1 (booleans are not counts)."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be an integer >= 1, got {value!r}")
+    return int(value)
+
+
 def _positive_float(name: str, value: object) -> float:
     """A finite, strictly positive float.
 
@@ -1182,6 +1580,10 @@ __all__ = [
     "HISTORY_COLUMNS",
     "REFEREE_FEATURE_COLUMNS",
     "REFEREE_HISTORY_COLUMNS",
+    "SAMPLE_DRAWS",
+    "SAMPLE_LINES",
+    "SAMPLE_SEED",
+    "SAMPLE_TEAM_COLUMNS",
     "CardsNegativeBinomial",
     "CardsPoisson",
     "CardsTeamRefNegativeBinomial",

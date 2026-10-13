@@ -19,6 +19,10 @@ from .base import (
     supports_samples,
 )
 from .cards_poisson import (
+    SAMPLE_DRAWS,
+    SAMPLE_LINES,
+    SAMPLE_SEED,
+    SAMPLE_TEAM_COLUMNS,
     CardsNegativeBinomial,
     CardsPoisson,
     CardsTeamRefNegativeBinomial,
@@ -71,6 +75,10 @@ def create_model(
 
 __all__ = [
     "MODEL_REGISTRY",
+    "SAMPLE_DRAWS",
+    "SAMPLE_LINES",
+    "SAMPLE_SEED",
+    "SAMPLE_TEAM_COLUMNS",
     "SIDE_MAX_COUNT",
     "CardsNegativeBinomial",
     "CardsPoisson",
