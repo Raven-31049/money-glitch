@@ -26,6 +26,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+import statsmodels.api as sm  # pyright: ignore[reportMissingModuleSource]
 
 #: A frame of outcome probabilities (one column per outcome, one row per bet)
 #: or a plain 2-D array for callers that carry no outcome labels.
@@ -59,6 +60,27 @@ class ReliabilityBin:
     count: int
 
 
+@dataclass(frozen=True)
+class LogisticCalibration:
+    """A fitted calibration (reliability) slope and intercept with intervals.
+
+    ``slope`` is the coefficient of ``logit(predicted)`` in the logistic
+    regression of the settled outcome on it: 1.0 is perfect, ``< 1`` means the
+    predictions are too extreme (over-confident), ``> 1`` too flat. ``intercept``
+    is the calibration-in-the-large term on the log-odds scale (0.0 is perfect).
+    ``count`` is how many (prediction, outcome) pairs were fitted, and the
+    ``*_low``/``*_high`` fields are the two-sided ``level`` interval.
+    """
+
+    slope: float
+    slope_low: float
+    slope_high: float
+    intercept: float
+    intercept_low: float
+    intercept_high: float
+    count: int
+
+
 def brier_score(predicted: Predicted, actual: Actual) -> float:
     """Mean squared error over the whole probability vector, per bet.
 
@@ -89,6 +111,80 @@ def log_loss(predicted: Predicted, actual: Actual) -> float:
             f"probability 0; bad row(s): {impossible[:10].tolist()}"
         )
     return float(-np.mean(np.log(settled)))
+
+
+def calibration_slope(
+    predicted_over: Sequence[float] | np.ndarray,
+    actual_over: Sequence[float] | Sequence[bool] | np.ndarray,
+    *,
+    level: float = 0.95,
+    epsilon: float = 1e-6,
+) -> LogisticCalibration:
+    """Fit the reliability slope: logistic regression of the outcome on logit(p).
+
+    For a single binary outcome (over/under at one line) the textbook
+    calibration test regresses the 0/1 result on the predicted log-odds. A slope
+    of 1 with intercept 0 is perfect calibration; a slope below 1 is the
+    over-confident (too-extreme) failure an EV filter would select, above 1 the
+    under-confident one. ``predicted_over`` is P(over) per match, ``actual_over``
+    is 1.0/True where the match went over.
+
+    Probabilities are clipped to ``[epsilon, 1 - epsilon]`` before the logit so a
+    hard 0/1 prediction yields a finite regressor rather than ``-inf``; the clip
+    is only ever the extreme log-odds value, never a renormalisation of the
+    probabilities. Requiring both outcomes to be present (otherwise the slope is
+    undefined) is deliberate — a degenerate sample is refused, not silently fit.
+    """
+    if not 0.0 < level < 1.0:
+        raise ValueError(f"level must be in (0, 1), got {level}")
+    if not 0.0 < epsilon < 0.5:
+        raise ValueError(f"epsilon must be in (0, 0.5), got {epsilon}")
+
+    p = np.asarray(predicted_over, dtype=float).ravel()
+    y = np.asarray(actual_over).ravel()
+    if p.shape != y.shape:
+        raise ValueError(
+            f"predicted_over has {p.shape[0]} value(s); actual_over has {y.shape[0]}"
+        )
+    count = int(p.shape[0])
+    if count < 2:
+        raise ValueError(f"need at least two matches to fit a slope, got {count}")
+    if not np.isfinite(p).all():
+        raise ValueError("predicted_over must be finite")
+    if p.min() < 0.0 or p.max() > 1.0:
+        raise ValueError("predicted_over must be probabilities in [0, 1]")
+    try:
+        y = y.astype(float)
+    except (TypeError, ValueError):
+        raise ValueError("actual_over must be numeric or boolean") from None
+    if not np.isfinite(y).all() or not np.isin(y, (0.0, 1.0)).all():
+        raise ValueError("actual_over must be 0/1 or boolean on every match")
+    if y.min() == y.max():
+        raise ValueError(
+            "actual_over has only one outcome; the calibration slope is undefined"
+        )
+
+    clipped = np.clip(p, epsilon, 1.0 - epsilon)
+    logit = np.log(clipped / (1.0 - clipped))
+    design = sm.add_constant(logit, has_constant="add")
+    try:
+        fit = sm.Logit(y, design).fit(disp=0)
+    except Exception as error:  # pragma: no cover - degenerate fits are rare
+        raise ValueError(f"calibration slope did not converge: {error}") from error
+
+    params = np.asarray(fit.params, dtype=float)
+    interval = np.asarray(fit.conf_int(alpha=1.0 - level), dtype=float)
+    if not np.isfinite(params).all() or not np.isfinite(interval).all():
+        raise ValueError("calibration slope fit produced non-finite estimates")
+    return LogisticCalibration(
+        slope=float(params[1]),
+        slope_low=float(interval[1, 0]),
+        slope_high=float(interval[1, 1]),
+        intercept=float(params[0]),
+        intercept_low=float(interval[0, 0]),
+        intercept_high=float(interval[0, 1]),
+        count=count,
+    )
 
 
 def reliability_table(
@@ -283,4 +379,13 @@ def _outcome_index(
     return mapped.to_numpy(dtype=np.intp)
 
 
-__all__ = ["Actual", "Predicted", "ReliabilityBin", "brier_score", "log_loss", "reliability_table"]
+__all__ = [
+    "Actual",
+    "LogisticCalibration",
+    "Predicted",
+    "ReliabilityBin",
+    "brier_score",
+    "calibration_slope",
+    "log_loss",
+    "reliability_table",
+]

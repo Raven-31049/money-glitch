@@ -18,8 +18,10 @@ import pandas as pd
 import pytest
 
 from bet_engine.eval import (
+    LogisticCalibration,
     ReliabilityBin,
     brier_score,
+    calibration_slope,
     log_loss,
     reliability_table,
 )
@@ -302,3 +304,101 @@ def test_a_non_positive_bin_count_is_refused():
 
     with pytest.raises(ValueError, match="n_bins must be"):
         reliability_table(predicted, actual, n_bins=0)
+
+
+# --- calibration slope -------------------------------------------------------
+
+
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def test_calibration_slope_is_one_for_perfectly_calibrated_data():
+    rng = np.random.default_rng(7)
+    n = 8000
+    p = rng.uniform(0.05, 0.95, n)
+    y = (rng.random(n) < p).astype(float)
+
+    fit = calibration_slope(p, y)
+
+    assert isinstance(fit, LogisticCalibration)
+    assert fit.count == n
+    assert fit.slope == pytest.approx(1.0, abs=0.1)
+    assert fit.intercept == pytest.approx(0.0, abs=0.1)
+    assert fit.slope_low < fit.slope < fit.slope_high
+    assert fit.intercept_low < fit.intercept < fit.intercept_high
+
+
+def test_calibration_slope_below_one_means_over_confident_predictions():
+    # Outcomes are drawn as if the true log-odds were half the predicted ones,
+    # so the fitted slope should sit near 0.5 — the over-confident failure.
+    rng = np.random.default_rng(11)
+    n = 8000
+    p = rng.uniform(0.1, 0.9, n)
+    q = _sigmoid(0.5 * np.log(p / (1.0 - p)))
+    y = (rng.random(n) < q).astype(float)
+
+    fit = calibration_slope(p, y)
+
+    assert fit.slope == pytest.approx(0.5, abs=0.1)
+    assert fit.slope_high < 1.0
+
+
+def test_calibration_slope_above_one_means_over_flat_predictions():
+    rng = np.random.default_rng(13)
+    n = 8000
+    p = rng.uniform(0.1, 0.9, n)
+    q = _sigmoid(2.0 * np.log(p / (1.0 - p)))
+    y = (rng.random(n) < q).astype(float)
+
+    fit = calibration_slope(p, y)
+
+    assert fit.slope == pytest.approx(2.0, abs=0.15)
+    assert fit.slope_low > 1.0
+
+
+def test_calibration_slope_accepts_boolean_outcomes():
+    fit = calibration_slope(
+        [0.2, 0.8, 0.3, 0.7, 0.5, 0.5], [False, True, True, False, True, False]
+    )
+
+    assert fit.count == 6
+    assert np.isfinite(fit.slope)
+
+
+def test_calibration_slope_clips_hard_zero_and_one_predictions():
+    # A hard 0/1 prediction must not make the logit infinite: the clip keeps the
+    # regressor finite, and it never renormalises the probabilities.
+    fit = calibration_slope([0.0, 1.0, 0.0, 1.0, 0.5, 0.5], [0, 1, 0, 1, 0, 1])
+
+    assert np.isfinite([fit.slope, fit.intercept]).all()
+
+
+def test_calibration_slope_refuses_a_single_outcome():
+    with pytest.raises(ValueError, match="only one outcome"):
+        calibration_slope([0.2, 0.4, 0.6], [1, 1, 1])
+
+
+def test_calibration_slope_refuses_mismatched_lengths():
+    with pytest.raises(ValueError, match="actual_over has"):
+        calibration_slope([0.2, 0.4], [1])
+
+
+def test_calibration_slope_refuses_out_of_range_probabilities():
+    with pytest.raises(ValueError, match="probabilities in"):
+        calibration_slope([1.2, 0.4], [1, 0])
+
+
+def test_calibration_slope_refuses_non_binary_outcomes():
+    with pytest.raises(ValueError, match="0/1"):
+        calibration_slope([0.2, 0.4], [1, 2])
+
+
+def test_calibration_slope_needs_at_least_two_matches():
+    with pytest.raises(ValueError, match="at least two"):
+        calibration_slope([0.5], [1])
+
+
+def test_calibration_slope_refuses_a_bad_level():
+    with pytest.raises(ValueError, match="level"):
+        calibration_slope([0.2, 0.8], [0, 1], level=1.0)

@@ -3,9 +3,11 @@
 from .bootstrap import BootstrapResult, PnlSource, bootstrap_pnl
 from .calibration import (
     Actual,
+    LogisticCalibration,
     Predicted,
     ReliabilityBin,
     brier_score,
+    calibration_slope,
     log_loss,
     reliability_table,
 )
@@ -31,6 +33,7 @@ __all__ = [
     "BootstrapResult",
     "BootstrapSummary",
     "CalibrationSummary",
+    "LogisticCalibration",
     "OddsSourceSummary",
     "Predicted",
     "PnlSource",
@@ -40,6 +43,7 @@ __all__ = [
     "StopModeSummary",
     "bootstrap_pnl",
     "brier_score",
+    "calibration_slope",
     "config_hash",
     "format_odds_source_summary",
     "interval_width",

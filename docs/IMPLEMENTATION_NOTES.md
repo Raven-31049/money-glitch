@@ -185,6 +185,50 @@ reliability readout must do the same.
 
 **Uncertainty is sampled, not assumed (Phase 1 step 4).** `CardsPoisson.predict_samples(df, n, *, lines, seed)` draws the model's own posterior uncertainty in one fit: the design coefficients from `N(beta, cov)` (covariance from the GLM's `cov_params`; the NB fit drops the alpha row/column) and each team/referee rate from its Gamma posterior (`shape = k*prior_mean + past_cards`, `rate = k + past_matches` — the same sufficient statistics the shrinkage already uses, so the posterior mean equals the shrunk point rate). Each draw is a valid over/under distribution (`poisson.sf` for Poisson, the convolved NB pmf otherwise), and a full call returns `(n, len(df), len(lines), n_outcomes)` — a line axis inserted before the outcome axis (the base contract's `(n, n_matches, n_outcomes)` otherwise). The coefficient-draw covariance is symmetrised with negative eigenvalues clipped and `nan_to_num`, so a rank-deficient fold (or a NB fit with no covariance) degrades to a point draw rather than raising. **Percentiles taken from these draws are marginals and are never renormalised across outcomes** (invariant 5): the 10th percentile of P(over) and of P(under) are read independently and can both be small for one uncertain match. `eval/uncertainty.py::marginal_percentiles` computes them (per-outcome, no renormalisation) and a test fails if that ever changes. `scripts/phase1_step4_uncertainty.py` runs it over a full walk-forward and reports interval widths, width drivers, width-band calibration and timing.
 
+**Phase 1 gate-1 calibration pass criterion (fixed before running the check).**
+The first Phase 1 gate item is "Calibration check passes (predicted over/under
+frequencies match actual)". It is checked on the adopted cards model's **point**
+probabilities, on seasons **1819-2324 only**, in **both** datasets (`all` and
+`no_covid`), at each of lines **3.5, 4.5 and 5.5** — a criterion written here,
+before any number is computed, so it cannot be chosen after seeing the result. A
+line passes only if all three hold:
+
+* **(a) calibration-in-the-large.** `|mean predicted P(over) - actual over rate|
+  <= 0.02` (the model is not biased up or down on average).
+* **(b) calibration slope.** Logistic regression of the over/under outcome on
+  `logit(predicted P(over))` gives a **slope in `[0.8, 1.2]`** (predictions are
+  neither too flat, slope > 1, nor too extreme, slope < 1). The 95% interval on
+  the slope and the intercept is reported alongside.
+* **(c) no local gap.** No reliability bin (ten equal-width bins on `[0, 1]`,
+  the step-3b/3c/4 binning) with `n >= 100` matches has
+  `|mean predicted - actual over rate| > 0.05`.
+
+The gate **passes** only if every line passes in both datasets. If a line fails,
+the failure is diagnosed as level (a), spread (b) or a local gap (c), and at most
+two fixes are **proposed** with their decision rules frozen in advance — never
+implemented at the gate. Any proposed fix must keep
+`P(over 3.5) > P(over 4.5) > P(over 5.5)` for every match. One candidate is the
+shelved step-3c Fix B (walk-forward affine recalibration of the expected total).
+
+**Phase 1 gate-1 result (run 2026-10-13, `scripts/phase1_gate1_calibration.py`).**
+**PASSED** — all three conditions hold at all three lines in both datasets, so no
+fix is proposed and the shelved Fix B stays shelved. Calibration-in-the-large:
+gaps of −0.010 / −0.015 / −0.012 (`all`, lines 3.5/4.5/5.5) and +0.001 / −0.008 /
+−0.007 (`no_covid`), all well inside 0.02. Calibration slope (95% CI): 0.95
+[0.73, 1.17] / 0.95 [0.73, 1.16] / 0.87 [0.65, 1.10] (`all`) and 0.98 [0.72,
+1.24] / 1.00 [0.74, 1.26] / 0.83 [0.56, 1.11] (`no_covid`) — every point estimate
+inside [0.8, 1.2], each interval straddling 1, the mildest reading being a touch
+of over-confidence (slopes ≤ 1) at line 5.5. No reliability bin with n ≥ 100 has
+|predicted − actual| > 0.05; the widest quoted-bin gaps are +0.044 (all, 3.5, bin
+0.5-0.6) and +0.030 (all, 4.5, bin 0.3-0.4). The visually large local gaps sit in
+bins below the n ≥ 100 threshold — `no_covid` line 5.5 bin 0.3-0.4 (n=88) predicts
+0.331 vs 0.205 actual, and `all` line 3.5 bin 0.2-0.3 (n=65) predicts 0.271 vs
+0.338 — which condition (c) does not judge. The total-count distribution matches
+within ~0.015 everywhere; the one systematic wobble is a slight under-prediction
+of 0-card matches (predicted 0.033 vs actual 0.047 `all`; 0.027 vs 0.042
+`no_covid`). Point log loss is 0.674/0.588/0.430 (`all`) and 0.677/0.612/0.465
+(`no_covid`).
+
 **Honesty rules in reporting.** No ROI conclusion from fewer than ~100 bets without
 an explicit "sample too small" statement. Every report states the bet count, the
 period, the model and code version, and the config hash.
@@ -276,6 +320,36 @@ Before declaring any phase done:
 
 ## 9. Change log
 
+- Phase 1 gate 1 — the calibration check, **PASSED**. Holdout unchanged
+  (`AGENTS.md` rule 9): the check runs on **1819-2324 only** in both datasets and
+  the script refuses a holdout season by name.
+  **(1) Config.** `configs/phase1_cards.yaml` now lists the quoted set
+  `lines: [3.5, 4.5, 5.5]` (not only 4.5), with a comment that in Part B the line
+  comes from the odds data per match. The `line` the constructor requires is no
+  longer stated in the config: the loader pops `lines` and hands the constructor
+  its scalar middle line (4.5); `model.params.lines` and
+  `model.params.half_life_days` are both report/feature params, never constructor
+  args. `scripts/phase1_step4_uncertainty.py`'s loader and the gate's loader
+  share this split (the gate asserts the config's set equals its own).
+  **(2) Calibration-slope helper.** `eval/calibration.py::calibration_slope`
+  (exported as `LogisticCalibration`) regresses the over/under outcome on
+  `logit(P(over))` and returns the slope and intercept with a two-sided 95%
+  interval; probabilities are clipped to `[1e-6, 1-1e-6]` only so a hard 0/1
+  prediction has a finite logit (never renormalised), and a single-outcome sample
+  is refused rather than fit. 11 tests in `tests/test_calibration.py`.
+  **(3) The gate.** `scripts/phase1_gate1_calibration.py` loads the adopted model,
+  runs one walk-forward per dataset, and reports per line per dataset the full
+  reliability table, calibration-in-the-large, slope+intercept with 95% intervals,
+  PASS/FAIL per condition, and the predicted-vs-actual total-count distribution
+  (0..9, 10+). It asserts the rebuilt line-4.5 pmf matches the walk-forward and
+  the line ordering holds on every match. Result: **all six line/dataset
+  combinations pass** — gaps within 0.02, slopes in [0.8, 1.2] (0.83–1.00, CIs
+  straddling 1), and no n ≥ 100 bin beyond 0.05. The large local gaps (e.g.
+  `no_covid` 5.5 bin 0.3-0.4, n=88, 0.331 vs 0.205) are below the n ≥ 100
+  threshold condition (c) judges. The count distribution matches within ~0.015,
+  with a slight 0-card under-prediction. No model, feature or threshold changed;
+  **no fix is proposed** and the shelved Fix B stays shelved. 12 tests in
+  `tests/test_gate1_calibration.py`.
 - Phase 1 step 4 — uncertainty for the adopted cards model. Holdout unchanged
   (`AGENTS.md` rule 9): everything is measured on **1819-2324 only** in both
   datasets, and the script refuses a holdout season by name.

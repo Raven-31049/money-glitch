@@ -2,14 +2,22 @@ name: phase1_cards
 # Phase 1's adopted cards model, frozen here as the single source every later
 # step loads. It is the Poisson team+referee design (registry type
 # `cards_team_ref`, the model step 3b froze and step 3c's Fix A kept) with:
-#   k = 6             shrinkage weight in pseudo-matches (model constructor arg)
-#   half_life_days    = 365  recency half-life for the rate history
-#   line              = 4.5  the point-estimate line (middle of the quoted set)
+#   k = 6                  shrinkage weight in pseudo-matches (constructor arg)
+#   half_life_days = 365   recency half-life for the rate history
+#   lines = [3.5,4.5,5.5]  the quoted over/under lines every calibration read
+#
+# In Part B the line is NOT fixed here: it comes from the odds data, per match
+# (each quoted over/under has its own threshold). This list is the development
+# and calibration set the Phase 1 gate is read at; `line` for the model's own
+# predict() is derived as the middle of it (4.5). The market label below is a
+# human-readable name for that middle line, not a constraint on Part B.
 #
 # `half_life_days` is a FEATURE-build parameter — it is consumed by
 # add_card_features / add_referee_feature, NOT by the model constructor — so a
 # step that loads this file must pop it and pass it to the feature builders
-# before calling create_model with the rest. The library default stays None
+# before calling create_model with the rest. `lines` is likewise a report/eval
+# parameter, not a constructor arg: the loader pops it and hands the constructor
+# the scalar `line` (the middle line) it requires. The library default stays None
 # (cumulative history), so steps 1-3b remain reproducible; only this variant
 # opts in to recency.
 market: cards_over_4.5
@@ -22,7 +30,7 @@ model:
   type: cards_team_ref
   params:
     k: 6.0
-    line: 4.5
+    lines: [3.5, 4.5, 5.5]
     half_life_days: 365.0
 staking:
   ev_threshold: 0.05

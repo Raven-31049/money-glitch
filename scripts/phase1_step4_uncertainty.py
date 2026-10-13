@@ -114,10 +114,13 @@ REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports"
 class AdoptedModel:
     """The resolved contents of ``configs/phase1_cards.yaml``.
 
-    ``params`` is what reaches the model constructor; ``half_life_days`` has
-    been split out (or set to None for the cumulative default) because it is a
-    feature-build parameter, not a constructor argument — the split the config's
-    own comments describe.
+    ``params`` is what reaches the model constructor; ``half_life_days`` and
+    ``lines`` have been split out because they are not constructor arguments —
+    the split the config's own comments describe. ``half_life_days`` is the
+    feature-build recency parameter (or None for the cumulative default);
+    ``lines`` is the quoted over/under set the reports are read at, and ``line``
+    is the scalar the constructor requires (the middle of ``lines``). In Part B
+    the line comes from the odds data per match, not from this file.
     """
 
     config: VariantConfig
@@ -125,26 +128,43 @@ class AdoptedModel:
     params: dict[str, Any]
     half_life_days: float | None
     line: float
+    lines: tuple[float, ...]
 
 
 def load_adopted_model(path: Path = CONFIG_PATH) -> AdoptedModel:
-    """Read the adopted variant and separate its feature param from its params."""
+    """Read the adopted variant and separate its feature/line params from params.
+
+    Two config keys are not constructor arguments and are popped here: the
+    feature-build ``half_life_days`` (handed to the feature builders) and the
+    report ``lines`` (the quoted set). The constructor still needs a scalar
+    ``line``, so it is taken from the config if present and otherwise derived as
+    the middle of ``lines`` — the same line the model's ``predict()`` settles at.
+    """
     config = load_variant(path)
     params = dict(config.model.params)
     half_life = params.pop("half_life_days", None)
     half_life_days = float(half_life) if half_life is not None else None
-    line = float(params.get("line", config_market_line(config)))
-    if line not in LINES:
+    raw_lines = params.pop("lines", None)
+    if raw_lines is None:
+        lines = tuple(LINES)
+    else:
+        lines = tuple(float(value) for value in raw_lines)
+    if not lines:
+        raise ValueError("config lines must not be empty")
+    line = float(params.pop("line", lines[len(lines) // 2]))
+    if line not in lines:
         raise ValueError(
-            f"config line {line:g} is not one of the reported lines {LINES}; "
+            f"config line {line:g} is not one of the quoted lines {lines}; "
             "the reliability tables would not cover the adopted line"
         )
+    params["line"] = line
     return AdoptedModel(
         config=config,
         model_type=config.model.type,
         params=params,
         half_life_days=half_life_days,
         line=line,
+        lines=lines,
     )
 
 
@@ -887,6 +907,11 @@ def main(argv: list[str] | None = None) -> int:
 
     started = time.time()
     adopted = load_adopted_model()
+    if adopted.lines != LINES:
+        raise ValueError(
+            f"config lines {adopted.lines} differ from the reported lines {LINES}; "
+            "the config is the single source and this script must be read at those lines"
+        )
     seasons = list(adopted.config.seasons)
     _guard_holdout(seasons)
     k = float(adopted.params.get("k", 6.0))

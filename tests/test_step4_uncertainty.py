@@ -8,8 +8,9 @@ What is pinned here:
 
 * the holdout guard refuses a holdout season by name;
 * :func:`load_adopted_model` reads the adopted model from
-  ``configs/phase1_cards.yaml`` and splits the feature-build half-life out of the
-  constructor params (the config plumbing the whole step rests on);
+  ``configs/phase1_cards.yaml`` and splits the feature-build half-life and the
+  quoted line set out of the constructor params (the config plumbing the whole
+  step rests on);
 * the per-match table is built from marginals that are never renormalised, and
   it refuses a draw that does not sum to 1 across outcomes;
 * the per-line point helper is ordered (P(over 3.5) > P(over 4.5) > P(over 5.5)).
@@ -93,9 +94,13 @@ def test_load_adopted_model_splits_the_feature_parameter_out():
 
     assert adopted.model_type == "cards_team_ref"
     assert adopted.line == 4.5
+    assert adopted.lines == (3.5, 4.5, 5.5)
     assert adopted.half_life_days == 365.0
-    # The feature-build half-life must NOT reach the constructor.
+    # Neither the feature-build half-life nor the report line set may reach the
+    # constructor; the scalar line the constructor requires is derived instead.
     assert "half_life_days" not in adopted.params
+    assert "lines" not in adopted.params
+    assert adopted.params["line"] == 4.5
     assert adopted.params.get("k") == 6.0
     assert "2425" not in adopted.config.seasons
 
