@@ -13,12 +13,9 @@ does **not** change the model. It measures the failure on 1819-2324 alone and
 reports the numbers a fix would have to move, then proposes at most two fixes
 with decision rules fixed in advance.
 
-The run found the premise only half true once the holdout is removed. The
-high-P(over) over-prediction was largely a holdout-season effect: on 1819-2324
-the line-4.5 high bin is calibrated and lines 3.5/5.5 are mis-shaped in
-*opposite* directions, not uniformly hot. The dominant, reproducible failure is
-drift — a league-wide card rate that rises across the seasons faster than the
-model's strictly-before-date cumulative history follows.
+The report states what the corrected, per-line numbers show, per dataset, and
+does not confirm the prior: a reliability table read at the wrong line would
+report the pattern the diagnostic was prompted by whether or not it is real.
 
 Two rules frame the whole step:
 
@@ -60,10 +57,12 @@ from statsmodels.tools.sm_exceptions import (
 
 from bet_engine.backtest import walk_forward
 from bet_engine.data.ingest import load_league
+from bet_engine.eval.calibration import log_loss
 from bet_engine.models import (
     CardsTeamRefPoisson,
     add_card_features,
     add_referee_feature,
+    total_pmf,
 )
 
 #: The final test set. Never loaded here — see the holdout rule in AGENTS.md.
@@ -90,20 +89,39 @@ TAIL_FRACTION = 0.10
 #: The over/under lines the P(over) tail re-check is reported at.
 LINES: tuple[float, ...] = (3.5, 4.5, 5.5)
 
+#: The line the single walk-forward runs at. The design and the expected total
+#: do not depend on the line (step 2/3 established it and this script asserts a
+#: rebuilt line-4.5 pmf reproduces it), so one run captures everything; every
+#: other line's P(over) is rebuilt from the captured per-side means.
+RUN_LINE = 4.5
+
 #: A reliability bin is quoted only from this many matches — the step-3b rule.
 MIN_RELIABILITY_BIN = 50
+
+#: Fix A's frozen half-life, in calendar days. The rule names one value and this
+#: is it: no other value is tried, and the *same* one is applied to the team,
+#: referee and league-mean sums (see models.cards_poisson.add_card_features).
+HALF_LIFE_DAYS = 365.0
+
+#: Fix A's rule allows a line to worsen by no more than this many nats.
+LOGLOSS_TOLERANCE = 0.001
+
+#: The two seasons whose mean |gap| decides Fix A's condition (1).
+LAST_TWO_SEASONS: tuple[str, ...] = ("2223", "2324")
 
 #: The rows the report quotes verbatim, frozen before any fix is built. Both
 #: rules are evaluated on 1819-2324 only, in both datasets; see render_fixes().
 FIX_A_NAME = "recency-weighted rate history (stop lagging a rising card rate)"
 FIX_A_RULE = (
-    "Adopt an exponentially time-weighted rate history — one half-life, applied "
-    "identically to the team, referee and league-mean sums, no other change — ONLY "
-    "IF, on 1819-2324 in BOTH datasets, (1) the mean absolute per-season gap "
-    "|actual mean - predicted mean| over the last two seasons (2223 and 2324) "
-    "shrinks by at least half versus the cumulative-history incumbent, AND (2) "
-    "walk-forward log loss at lines 3.5, 4.5 and 5.5 does not worsen by more than "
-    "+0.001 in either dataset. Otherwise keep the cumulative history."
+    "Adopt an exponentially time-weighted rate history — half-life 365 calendar "
+    "days, applied identically to the team, referee and league-mean sums, no "
+    "other change — ONLY IF, on 1819-2324 in BOTH datasets, (1) the mean absolute "
+    "per-season gap |actual mean - predicted mean| over the last two seasons "
+    "(2223 and 2324) shrinks by at least half versus the cumulative-history "
+    "incumbent, AND (2) walk-forward log loss at lines 3.5, 4.5 and 5.5 does not "
+    "worsen by more than +0.001 in either dataset. Otherwise keep the cumulative "
+    "history. The half-life is fixed at 365 days before evaluation: one value, no "
+    "tuning."
 )
 
 FIX_B_NAME = "walk-forward affine recalibration of the expected total"
@@ -193,18 +211,26 @@ def add_team_prior_counts(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def run_incumbent(features: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, float]]:
-    """One walk-forward of the incumbent; return its predictions and expected totals.
+def run_incumbent(
+    features: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict[str, float], dict[str, tuple[float, float, float]]]:
+    """One walk-forward of the incumbent; return predictions, totals and sides.
 
-    The design does not depend on the line, so a single line is enough to
-    capture every match's expected total and its over/under probabilities (step
-    2/3 established that the folds, design and totals are line-independent and
-    assert it). Nothing is tuned and no other model is fitted.
+    The design and the expected total do not depend on the line, so a single
+    line is enough to capture every match's expected total *and* its per-side
+    means; every other line's P(over) is then rebuilt from those means with
+    :func:`probabilities_for_line`` (step 3b's pattern). Returning the sides is
+    what lets the reliability table be read at the line it claims to be at
+    instead of reusing one line's probabilities for all of them.
+
+    ``sides`` maps match_id -> (mu_home, mu_away, alpha); the two-side Poisson
+    incumbent has no dispersion parameter, so the effective alpha is 0.0.
+    Nothing is tuned and no other model is fitted.
     """
     instances: list[object] = []
 
     def factory() -> object:
-        model = CardsTeamRefPoisson(outcomes=("over", "under"), line=4.5, k=K)
+        model = CardsTeamRefPoisson(outcomes=("over", "under"), line=RUN_LINE, k=K)
         instances.append(model)
         return model
 
@@ -219,11 +245,118 @@ def run_incumbent(features: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, float
         )
 
     totals: dict[str, float] = {}
+    sides: dict[str, tuple[float, float, float]] = {}
     for model in instances:
-        totals.update(
-            {str(k): float(v) for k, v in model.predicted_totals.items()}  # type: ignore[attr-defined]
+        alpha = getattr(model, "alpha_", None)
+        effective = float(alpha) if alpha is not None else 0.0
+        for match_id, (home, away) in getattr(model, "predicted_sides", {}).items():
+            sides[str(match_id)] = (float(home), float(away), effective)
+        for match_id, total in getattr(model, "predicted_totals", {}).items():
+            totals[str(match_id)] = float(total)
+    return prediction, totals, sides
+
+
+def probabilities_for_line(
+    sides: dict[str, tuple[float, float, float]], ids: np.ndarray, line: float
+) -> pd.DataFrame:
+    """Over/under read off each match's own total pmf at ``line``.
+
+    The pmf is the convolution of the two captured per-side means (step 3b's
+    :func:`distribution_from_sides`, inlined to one line), so ``over`` is
+    ``P(X > line)`` for *that* line — not another line's probability reused.
+    """
+    record = np.array([sides[str(match_id)] for match_id in ids], dtype=float)
+    counts, pmf = total_pmf(record[:, 0], record[:, 1], record[:, 2])
+    over = pmf[:, counts > line].sum(axis=1)
+    under = pmf[:, counts <= line].sum(axis=1)
+    return pd.DataFrame(
+        {"over": over, "under": under}, index=pd.Index(ids, name="match_id")
+    )
+
+
+def settled_over(actual_total: pd.Series, ids: np.ndarray, line: float) -> pd.Series:
+    """Whether each match's total went over ``line`` — the market's own rule."""
+    total = actual_total.reindex(ids).to_numpy(dtype=float)
+    return pd.Series(
+        np.where(total > line, "over", "under"),
+        index=pd.Index(ids, name="match_id"),
+    )
+
+
+def line_log_losses(
+    sides: dict[str, tuple[float, float, float]],
+    ids: np.ndarray,
+    actual_total: pd.Series,
+    lines: tuple[float, ...],
+) -> dict[float, float]:
+    """Walk-forward log loss at each line, from each line's own probabilities."""
+    out: dict[float, float] = {}
+    for line in lines:
+        wide = probabilities_for_line(sides, ids, line)
+        out[line] = float(log_loss(wide, settled_over(actual_total, ids, line)))
+    return out
+
+
+def assert_reconstruction(
+    prediction: pd.DataFrame,
+    sides: dict[str, tuple[float, float, float]],
+    ids: np.ndarray,
+    line: float,
+) -> None:
+    """The rebuilt line-``line`` pmf must reproduce the walk-forward's output.
+
+    The walk-forward emits P(over)/P(under) at ``RUN_LINE``; rebuilding that
+    line from the captured per-side means must give the same numbers, otherwise
+    the captured sides are not the ones behind the prediction and every other
+    line's reliability would be fiction. Raises AssertionError, not ``assert``,
+    so ``python -O`` cannot disable the check the whole report rests on.
+    """
+    direct = (
+        prediction.pivot(index="match_id", columns="outcome", values="model_prob")
+        .astype(float)[["over", "under"]]
+        .loc[ids]
+    )
+    rebuilt = probabilities_for_line(sides, ids, line)[["over", "under"]]
+    if not np.allclose(
+        direct.to_numpy(dtype=float), rebuilt.to_numpy(dtype=float), atol=1e-12
+    ):
+        worst = int(np.argmax(np.abs(direct.to_numpy() - rebuilt.to_numpy()).max(axis=1)))
+        raise AssertionError(
+            "rebuilt line-"
+            f"{line:g} probabilities do not match the walk-forward output "
+            f"(worst match {ids[worst]}); the captured per-side means are not "
+            "the ones behind the prediction"
         )
-    return prediction, totals
+
+
+def assert_line_ordering(
+    sides: dict[str, tuple[float, float, float]],
+    ids: np.ndarray,
+    lines: tuple[float, ...],
+) -> None:
+    """P(over lower) > P(over higher) must hold for every match.
+
+    A higher line is strictly harder to clear, so the over probabilities must
+    fall with the line on every single match. If they do not, the probabilities
+    are not being rebuilt per line — the bug this guard exists to catch — so it
+    raises AssertionError rather than ``assert``. The Poisson total is discrete,
+    so a half-line boundary never lets two lines tie.
+    """
+    ordered = sorted(lines)
+    over = {
+        line: probabilities_for_line(sides, ids, line)["over"].to_numpy(dtype=float)
+        for line in ordered
+    }
+    for lower, higher in zip(ordered, ordered[1:]):
+        wins = over[lower] > over[higher]
+        if not wins.all():
+            offenders = ids[~wins][:3].tolist()
+            raise AssertionError(
+                f"P(over {lower:g}) must exceed P(over {higher:g}) for every "
+                f"match; {int((~wins).sum())} match(es) violate it, e.g. "
+                f"{offenders} — per-line probabilities are not rebuilt "
+                "independently"
+            )
 
 
 def build_analysis(features: pd.DataFrame, totals: dict[str, float]) -> pd.DataFrame:
@@ -271,25 +404,18 @@ def build_analysis(features: pd.DataFrame, totals: dict[str, float]) -> pd.DataF
 # ---------------------------------------------------------------------------
 
 
-def over_reliability(
-    prediction: pd.DataFrame, actual_total: pd.Series, line: float
-) -> list[dict]:
-    """Bin P(over) and compare mean prediction with the actual over-frequency.
+def over_reliability(p_over: np.ndarray, y_over: np.ndarray) -> list[dict]:
+    """Bin one line's P(over) and compare mean prediction with actual frequency.
 
-    This re-checks, on 1819-2324 only, the step-3b pattern the diagnostic was
-    prompted by: over-prediction in the highest P(over) bins and
-    under-prediction in the lowest. ``actual_total`` is the match total keyed by
-    match_id; "over" is ``total > line``, the market's own rule.
+    Takes *that line's* probabilities and *that line's* settled outcomes, so the
+    three lines' tables are genuinely different (step 3b's signature, adopted so
+    a line can never be read with another line's probabilities). ``p_over`` is
+    the model's P(total > line); ``y_over`` is 1 where the match did go over.
     """
-    wide = (
-        prediction.pivot(index="match_id", columns="outcome", values="model_prob")
-        .astype(float)[["over", "under"]]
-    )
-    total = actual_total.reindex(wide.index).to_numpy(dtype=float)
-    over_happened = (total > line).astype(float)
-    p_over = wide["over"].to_numpy(dtype=float)
+    p = np.asarray(p_over, dtype=float)
+    y = np.asarray(y_over, dtype=float)
     edges = np.linspace(0.0, 1.0, 11)
-    bucket = np.clip(np.searchsorted(edges, p_over, side="right") - 1, 0, 9)
+    bucket = np.clip(np.searchsorted(edges, p, side="right") - 1, 0, 9)
     rows = []
     for position in range(10):
         mask = bucket == position
@@ -299,8 +425,8 @@ def over_reliability(
                 "low": float(edges[position]),
                 "high": float(edges[position + 1]),
                 "n": n,
-                "predicted": float(p_over[mask].mean()) if n else float("nan"),
-                "actual": float(over_happened[mask].mean()) if n else float("nan"),
+                "predicted": float(p[mask].mean()) if n else float("nan"),
+                "actual": float(y[mask].mean()) if n else float("nan"),
             }
         )
     return rows
@@ -459,6 +585,68 @@ def lag_summary(season_rows: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Fix A evaluation (frozen rule; the model change lives in models/, this only
+# measures it on 1819-2324)
+# ---------------------------------------------------------------------------
+
+
+def recent_season_gap(season_rows: list[dict]) -> float:
+    """Mean |actual mean - predicted mean| over the last two loaded seasons.
+
+    Fix A's condition (1): the number the recency build has to at least halve.
+    ``season_rows`` is :func:`season_drift`'s output, whose ``gap`` is
+    ``actual_mean - predicted_mean``.
+    """
+    gaps = [
+        abs(row["gap"])
+        for row in season_rows
+        if row["season"] in LAST_TWO_SEASONS
+    ]
+    if not gaps:
+        raise ValueError(
+            f"no season(s) {LAST_TWO_SEASONS} in the drift table; cannot decide "
+            "Fix A's last-two-season condition"
+        )
+    return float(np.mean(gaps))
+
+
+def build_fix_a(
+    season_rows: dict[str, list[dict]],
+    recency_season_rows: dict[str, list[dict]],
+    incumbent_logloss: dict[str, dict[float, float]],
+    recency_logloss: dict[str, dict[float, float]],
+) -> dict:
+    """Evaluate Fix A's two conditions per dataset, then combine them.
+
+    Condition (1): the recency build's mean |gap| over 2223+2324 is at most half
+    the incumbent's. Condition (2): every line's log loss worsens by no more
+    than ``LOGLOSS_TOLERANCE``. The rule adopts only if *both* hold in *both*
+    datasets, so that is exactly ``adopt``.
+    """
+    per_dataset: dict[str, dict] = {}
+    for dataset in season_rows:
+        incumbent_gap = recent_season_gap(season_rows[dataset])
+        recency_gap = recent_season_gap(recency_season_rows[dataset])
+        deltas = {
+            line: recency_logloss[dataset][line] - incumbent_logloss[dataset][line]
+            for line in LINES
+        }
+        per_dataset[dataset] = {
+            "incumbent_gap": incumbent_gap,
+            "recency_gap": recency_gap,
+            "halved": recency_gap <= 0.5 * incumbent_gap,
+            "logloss_deltas": deltas,
+            "not_worse": all(
+                delta <= LOGLOSS_TOLERANCE for delta in deltas.values()
+            ),
+        }
+    adopt = all(
+        value["halved"] and value["not_worse"] for value in per_dataset.values()
+    )
+    return {"per_dataset": per_dataset, "adopt": adopt}
+
+
+# ---------------------------------------------------------------------------
 # report
 # ---------------------------------------------------------------------------
 
@@ -607,9 +795,16 @@ def render_report(payload: dict) -> str:
     )
     add(
         f"- Walk-forward: min_train_days={MIN_TRAIN_DAYS}, "
-        f"refit_every_days={REFIT_EVERY_DAYS} (train strictly before each fold day)"
+        f"refit_every_days={REFIT_EVERY_DAYS} (train strictly before each fold day). "
+        f"A single run at line {RUN_LINE:g}; every other line's P(over) is rebuilt "
+        "from the captured per-side means (this is the reliability bug this "
+        "revision fixes — see the note below)."
     )
-    add("- Diagnostic only: no model, feature or threshold is changed.")
+    add(
+        "- Diagnostic plus Fix A (a recency-weighted feature, evaluated under its "
+        "frozen rule on 1819-2324 only). No other model, feature or threshold is "
+        "changed."
+    )
     add("")
 
     add("## Findings")
@@ -736,22 +931,109 @@ def render_report(payload: dict) -> str:
                 add(f"| {row['low']:.1f}-{row['high']:.1f} | {row['n']} | {pred} | {act} |")
             add("")
 
-    add("## Proposed fixes (NOT implemented — decision rules frozen below)")
+    add("## Fixes")
     add("")
     add(
-        "These are proposals only. No fix is in this repository; nothing in "
-        "`models/` changed. Each rule is evaluated on 1819-2324 in **both** "
-        "datasets, with the incumbent as control, and is written here before any "
-        "implementation so the test cannot be chosen after the fact."
+        "Each rule is evaluated on 1819-2324 in **both** datasets, with the "
+        "incumbent as control, and was fixed before any implementation so the "
+        "test cannot be chosen after the fact."
     )
     add("")
     add(f"### Fix A — {FIX_A_NAME}")
     add("")
     add(f"> {FIX_A_RULE}")
     add("")
-    add(f"### Fix B — {FIX_B_NAME}")
+    add(
+        f"**Implemented** as `half_life_days={payload['half_life_days']:g}` on "
+        "`add_card_features`/`add_referee_feature` (config parameter "
+        "`model.params.half_life_days`, default `None` = the unchanged cumulative "
+        "incumbent). Evaluated below on 1819-2324 only."
+    )
+    add("")
+    add(
+        f"**Decision: {'PASS — ADOPT recency-weighted history' if payload['fix_a']['adopt'] else 'FAIL — keep the cumulative incumbent'}.**"
+    )
+    add("")
+    add("#### Condition 1 — last two seasons' mean |gap| halves")
+    add("")
+    add(
+        f"Mean of |actual mean - predicted mean| over seasons "
+        f"{', '.join(LAST_TWO_SEASONS)}."
+    )
+    add("")
+    add("| dataset | incumbent |gap| | half of incumbent | recency |gap| | halves? |")
+    add("|---|---:|---:|---:|:--:|")
+    for dataset in payload["datasets"]:
+        entry = payload["fix_a"]["per_dataset"][dataset]
+        add(
+            f"| {dataset} | {entry['incumbent_gap']:.3f} | "
+            f"{0.5 * entry['incumbent_gap']:.3f} | {entry['recency_gap']:.3f} | "
+            f"{'yes' if entry['halved'] else 'no'} |"
+        )
+    add("")
+    add(f"#### Condition 2 — log loss worsens by at most +{LOGLOSS_TOLERANCE:g}")
+    add("")
+    add(
+        "Walk-forward log loss at each line, from that line's own rebuilt "
+        "probabilities. `delta` is recency minus incumbent; condition 2 holds "
+        f"when every delta is <= +{LOGLOSS_TOLERANCE:g}."
+    )
+    add("")
+    add("| dataset | line | incumbent log loss | recency log loss | delta | ok? |")
+    add("|---|---:|---:|---:|---:|:--:|")
+    for dataset in payload["datasets"]:
+        entry = payload["fix_a"]["per_dataset"][dataset]
+        for line in LINES:
+            delta = entry["logloss_deltas"][line]
+            add(
+                f"| {dataset} | {line:g} | "
+                f"{payload['incumbent_logloss'][dataset][line]:.5f} | "
+                f"{payload['recency_logloss'][dataset][line]:.5f} | "
+                f"{delta:+.5f} | "
+                f"{'yes' if delta <= LOGLOSS_TOLERANCE else 'NO'} |"
+            )
+    add("")
+    add("#### Drift — incumbent vs recency, per season")
+    add("")
+    add("| dataset | season | n | actual mean | incumbent pred | incumbent gap | recency pred | recency gap |")
+    add("|---|---|---:|---:|---:|---:|---:|---:|")
+    for dataset in payload["datasets"]:
+        incumbent_rows = {row["season"]: row for row in payload["season_rows"][dataset]}
+        for row in payload["recency_season_rows"][dataset]:
+            base = incumbent_rows[row["season"]]
+            add(
+                f"| {dataset} | {row['season']} | {row['n']} | "
+                f"{row['actual_mean']:.3f} | {base['predicted_mean']:.3f} | "
+                f"{base['gap']:+.3f} | {row['predicted_mean']:.3f} | "
+                f"{row['gap']:+.3f} |"
+            )
+    add("")
+    add("#### Drift — incumbent vs recency, per season-month (pooled)")
+    add("")
+    add("| dataset | season month | month | n | actual mean | incumbent pred | incumbent gap | recency pred | recency gap |")
+    add("|---|---:|---|---:|---:|---:|---:|---:|---:|")
+    for dataset in payload["datasets"]:
+        incumbent_rows = {
+            row["season_month"]: row for row in payload["month_rows"][dataset]
+        }
+        for row in payload["recency_month_rows"][dataset]:
+            base = incumbent_rows[row["season_month"]]
+            add(
+                f"| {dataset} | {row['season_month']} | {row['month']} | {row['n']} | "
+                f"{row['actual_mean']:.3f} | {base['predicted_mean']:.3f} | "
+                f"{base['gap']:+.3f} | {row['predicted_mean']:.3f} | "
+                f"{row['gap']:+.3f} |"
+            )
+    add("")
+    add(f"### Fix B — {FIX_B_NAME} (SHELVED)")
     add("")
     add(f"> {FIX_B_RULE}")
+    add("")
+    add(
+        "**Not implemented.** The rule is recorded here and in "
+        "`docs/IMPLEMENTATION_NOTES.md` as shelved, pending the corrected "
+        "per-line tables. Nothing in `models/` recalibrates anything."
+    )
     add("")
 
     add("## Notes")
@@ -801,19 +1083,38 @@ def main(argv: list[str] | None = None) -> int:
     month_rows: dict[str, list[dict]] = {}
     lag: dict[str, dict] = {}
     reliability: dict[str, dict[float, list[dict]]] = {}
+    incumbent_logloss: dict[str, dict[float, float]] = {}
+    recency_season_rows: dict[str, list[dict]] = {}
+    recency_month_rows: dict[str, list[dict]] = {}
+    recency_logloss: dict[str, dict[float, float]] = {}
 
     frames = {"all": raw, "no_covid": raw.loc[~covid]}
     for dataset_name in datasets:
         frame = frames[dataset_name]
         features = add_referee_feature(add_card_features(frame, K), K)
         features = add_team_prior_counts(features)
-        prediction, totals = run_incumbent(features)
+        prediction, totals, sides = run_incumbent(features)
         analysis = build_analysis(features, totals)
 
+        ids = np.asarray(prediction["match_id"].drop_duplicates())
+        # The whole report rests on these two: the captured sides reproduce the
+        # walk-forward's own line, and the lines are strictly ordered.
+        assert_reconstruction(prediction, sides, ids, RUN_LINE)
+        assert_line_ordering(sides, ids, LINES)
+
         actual_total = features.set_index("match_id")["total_cards"]
-        reliability[dataset_name] = {
-            line: over_reliability(prediction, actual_total, line) for line in LINES
-        }
+        reliability[dataset_name] = {}
+        for line in LINES:
+            wide = probabilities_for_line(sides, ids, line)
+            y_over = (
+                actual_total.reindex(ids).to_numpy(dtype=float) > line
+            ).astype(float)
+            reliability[dataset_name][line] = over_reliability(
+                wide["over"].to_numpy(dtype=float), y_over
+            )
+        incumbent_logloss[dataset_name] = line_log_losses(
+            sides, ids, actual_total, LINES
+        )
 
         extreme_tables[dataset_name] = group_table(analysis)
         decile_tables[dataset_name] = decile_table(analysis)
@@ -821,13 +1122,42 @@ def main(argv: list[str] | None = None) -> int:
         season_rows[dataset_name] = season_drift(analysis)
         month_rows[dataset_name] = month_drift(analysis)
         lag[dataset_name] = lag_summary(season_rows[dataset_name])
+
+        # Fix A: the identical recipe, only the features' recency weight added.
+        recency_features = add_referee_feature(
+            add_card_features(frame, K, half_life_days=HALF_LIFE_DAYS),
+            K,
+            half_life_days=HALF_LIFE_DAYS,
+        )
+        recency_features = add_team_prior_counts(recency_features)
+        recency_prediction, recency_totals, recency_sides = run_incumbent(
+            recency_features
+        )
+        recency_analysis = build_analysis(recency_features, recency_totals)
+        recency_ids = np.asarray(recency_prediction["match_id"].drop_duplicates())
+        if not np.array_equal(ids, recency_ids):
+            raise AssertionError(
+                "recency variant scored a different match set than the incumbent"
+            )
+        assert_line_ordering(recency_sides, recency_ids, LINES)
+        recency_season_rows[dataset_name] = season_drift(recency_analysis)
+        recency_month_rows[dataset_name] = month_drift(recency_analysis)
+        recency_logloss[dataset_name] = line_log_losses(
+            recency_sides, recency_ids, actual_total, LINES
+        )
         print(
             f"[{dataset_name}] {len(analysis)} scored matches; "
             f"top gap {extreme_tables[dataset_name][2]['gap']:+.3f}, "
-            f"bottom gap {extreme_tables[dataset_name][0]['gap']:+.3f}",
+            f"bottom gap {extreme_tables[dataset_name][0]['gap']:+.3f}; "
+            f"recency last-2 |gap| "
+            f"{recent_season_gap(recency_season_rows[dataset_name]):.3f} vs "
+            f"incumbent {recent_season_gap(season_rows[dataset_name]):.3f}",
             flush=True,
         )
 
+    fix_a = build_fix_a(
+        season_rows, recency_season_rows, incumbent_logloss, recency_logloss
+    )
     findings = findings_sentences(
         extreme_tables, decile_tables, season_rows, lag, reliability, LINES
     )
@@ -843,11 +1173,27 @@ def main(argv: list[str] | None = None) -> int:
         "month_rows": month_rows,
         "lag": lag,
         "reliability": reliability,
+        "incumbent_logloss": incumbent_logloss,
+        "recency_season_rows": recency_season_rows,
+        "recency_month_rows": recency_month_rows,
+        "recency_logloss": recency_logloss,
+        "fix_a": fix_a,
+        "half_life_days": HALF_LIFE_DAYS,
         "findings": findings,
         "notes": [
-            "Diagnostic only: the model, its features, k and the walk-forward "
-            "cadence are unchanged from step 3b. Nothing here is a candidate for "
-            "adoption until a fix's frozen rule clears on 1819-2324.",
+            "Reliability fix: an earlier revision of this script read the "
+            "P(over) table for every line off the one walk-forward run at line "
+            f"{RUN_LINE:g}, so lines 3.5/4.5/5.5 showed identical predictions. "
+            "Each line is now rebuilt from the captured per-side means, the "
+            "rebuilt line-4.5 pmf is asserted to reproduce the walk-forward's "
+            "own output, and P(over 3.5) > P(over 4.5) > P(over 5.5) is "
+            "asserted for every match.",
+            "Fix A (recency-weighted rate history, half-life "
+            f"{HALF_LIFE_DAYS:g} days) is implemented as a feature parameter and "
+            "evaluated under its frozen rule on 1819-2324 only, both datasets. "
+            "Fix B is recorded and shelved, not implemented.",
+            "The incumbent's model, k and the walk-forward cadence are unchanged "
+            "from step 3b.",
             "HOLDOUT: seasons " + ", ".join(HOLDOUT_SEASONS) + " are the final "
             "test set and are not loaded (AGENTS.md rule 9). They are reported "
             "once, at the end, when the user asks.",

@@ -785,3 +785,98 @@ def test_walk_forward_end_to_end_with_the_referee_variant():
     assert captured == set(result["match_id"])
     assert all(model.n_training_rows > 0 for model in models)
 
+
+# ---------------------------------------------------------------------------
+# recency weighting (Fix A): half_life_days on the feature builders
+# ---------------------------------------------------------------------------
+#
+# The two dates below are exactly one half-life (365 days) apart, so the decay
+# weight is exactly 0.5 and every rate is arithmetic a reader can do on paper.
+
+
+def _one_half_life_apart() -> pd.DataFrame:
+    """X plays at home on two dates a year apart; its old match is 10 cards
+    and its current one is 0, and every opponent side is 0, so the league mean
+    at the second date is (10 + 0) / 2 = 5 cards per side."""
+    return pd.DataFrame(
+        {
+            "match_id": ["m1", "m2"],
+            "league": "E0",
+            "date": pd.to_datetime(["2021-08-01", "2022-08-01"]),
+            "home": ["X", "X"],
+            "away": ["Y", "Y"],
+            "hy": [10, 0],
+            "ay": [0, 0],
+            "hr": [0, 0],
+            "ar": [0, 0],
+        }
+    )
+
+
+def test_half_life_none_is_the_default_cumulative_build():
+    """The parameter is opt-in: leaving it out and passing None are the same
+    build, so the frozen incumbent is reproduced bit for bit."""
+    default = add_card_features(_one_half_life_apart(), 6.0)
+    explicit = add_card_features(_one_half_life_apart(), 6.0, half_life_days=None)
+
+    pd.testing.assert_frame_equal(default, explicit)
+
+
+def test_recency_halves_a_one_half_life_old_match_by_hand():
+    """X's only prior match is exactly one half-life old, so it counts half:
+
+        past_sum = 0.5 * 10 = 5,  past_count = 0.5 * 1,  league mean = 5
+        rate = (5 + 6 * 5) / (0.5 + 6) = 70 / 13.
+
+    The cumulative build keeps the whole match: (10 + 6 * 5) / 7 = 40 / 7.
+    """
+    features = add_card_features(
+        _one_half_life_apart(), 6.0, half_life_days=365.0
+    ).set_index("match_id")
+    cumulative = add_card_features(_one_half_life_apart(), 6.0).set_index("match_id")
+
+    assert features.loc["m2", "league_mean"] == pytest.approx(5.0)
+    assert features.loc["m2", "home_rate"] == pytest.approx((0.5 * 10 + 6 * 5) / (0.5 + 6))
+    assert features.loc["m2", "away_rate"] == pytest.approx((0.5 * 0 + 6 * 5) / (0.5 + 6))
+    # Down-weighting an old high value pulls the rate down versus cumulative.
+    assert features.loc["m2", "home_rate"] < cumulative.loc["m2", "home_rate"]
+    assert cumulative.loc["m2", "home_rate"] == pytest.approx((10 + 6 * 5) / 7)
+
+
+def _referee_two_half_lives_apart() -> pd.DataFrame:
+    """R1 officiates day 1 (10 cards) and day 3 (0), two half-lives later; R2
+    debuts on day 2 (0 cards). Relief match totals make the league mean total
+    countable: 10, 0, then R1 again."""
+    return pd.DataFrame(
+        {
+            "match_id": ["m1", "m2", "m3"],
+            "league": "E0",
+            "date": pd.to_datetime(["2021-08-01", "2022-08-01", "2023-08-01"]),
+            "home": ["X", "X", "X"],
+            "away": ["Y", "Y", "Y"],
+            "hy": [10, 0, 0],
+            "ay": [0, 0, 0],
+            "hr": [0, 0, 0],
+            "ar": [0, 0, 0],
+            "referee": ["R1", "R2", "R1"],
+        }
+    )
+
+
+def test_referee_recency_weights_by_two_half_lives_by_hand():
+    """R1's day-1 match is two half-lives old at day 3, so it counts 0.25:
+
+        past_sum = 0.25 * 10 = 2.5,  past_count = 0.25
+        league mean total = (10 * 0.25 + 0 * 0.5) / (1 * 0.25 + 1 * 0.5) = 10 / 3
+        rate = (2.5 + 6 * 10/3) / (0.25 + 6) = 3.6
+
+    ``ref_past_count`` is the effective (decayed) count, 0.25, not 1.
+    """
+    features = add_referee_feature(
+        _referee_two_half_lives_apart(), 6.0, half_life_days=365.0
+    ).set_index("match_id")
+
+    assert features.loc["m3", "ref_past_count"] == pytest.approx(0.25)
+    assert features.loc["m3", "ref_rate"] == pytest.approx((2.5 + 6 * (10 / 3)) / (0.25 + 6))
+    assert features.loc["m3", "ref_rate"] == pytest.approx(3.6)
+

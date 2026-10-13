@@ -95,7 +95,13 @@ _PROBE_DELTA = 10.0
 # ---------------------------------------------------------------------------
 
 
-def add_card_features(df: pd.DataFrame, k: float, *, verify: bool = True) -> pd.DataFrame:
+def add_card_features(
+    df: pd.DataFrame,
+    k: float,
+    *,
+    half_life_days: float | None = None,
+    verify: bool = True,
+) -> pd.DataFrame:
     """``df`` plus causal per-team card rates.
 
     ``k`` is the shrinkage weight in pseudo-matches: a team's rate is
@@ -109,20 +115,42 @@ def add_card_features(df: pd.DataFrame, k: float, *, verify: bool = True) -> pd.
     constant, because how fast a rate should be trusted is a modelling choice a
     variant config has to be able to state.
 
+    ``half_life_days`` is the optional recency weight (config parameter
+    ``model.params.half_life_days``). Left ``None`` the history is cumulative —
+    every earlier match of the season-to-date counts the same, which is the
+    incumbent frozen by step 3b, reproduced bit for bit. Set to a number of
+    days, each earlier match's contribution to *both* the numerator and the
+    denominator is weighted ``0.5 ** (days_before / half_life_days)``, so a
+    match one half-life old counts half as much and the rate leans on the
+    recent form of a rising or falling card rate. One half-life is applied to
+    the team sums, the referee sums and the league-mean sums alike (see
+    :func:`add_referee_feature`); nothing else changes.
+
     ``verify`` runs :func:`assert_features_are_causal` on the result. It costs a
     handful of extra feature passes (milliseconds at league scale) and turns
     "features never see their own result" from a claim in a docstring into a
-    runtime assertion — the same shape as the walk-forward leak check.
+    runtime assertion — the same shape as the walk-forward leak check. The probe
+    is bound to the same ``half_life_days`` the features were built with, so a
+    recency build is checked, not an unweighted one.
     """
     _positive_float("k", k)
+    if half_life_days is not None:
+        _positive_float("half_life_days", half_life_days)
     _require_columns(df, HISTORY_COLUMNS)
-    features = _add_card_features(df, k)
+    features = _add_card_features(df, k, half_life_days)
     if verify:
-        assert_features_are_causal(_add_card_features, df, k, context="add_card_features")
+        assert_features_are_causal(
+            lambda frame, weight: _add_card_features(frame, weight, half_life_days),
+            df,
+            k,
+            context="add_card_features",
+        )
     return features
 
 
-def _add_card_features(df: pd.DataFrame, k: float) -> pd.DataFrame:
+def _add_card_features(
+    df: pd.DataFrame, k: float, half_life_days: float | None = None
+) -> pd.DataFrame:
     """The computation itself: no verification, so the probe cannot recurse."""
     out = df.copy()
     hy = pd.to_numeric(out["hy"], errors="coerce")
@@ -165,31 +193,49 @@ def _add_card_features(df: pd.DataFrame, k: float) -> pd.DataFrame:
     history = (
         long.loc[usable]
         .groupby(["team", "date"], sort=True)["own_cards"]
-        .agg(past_sum="sum", past_count="count")
+        .agg(value="sum", count="count")
         .reset_index()
-        .sort_values(["team", "date"], kind="mergesort")
     )
-    history["past_sum"] = (
-        history.groupby("team")["past_sum"].cumsum() - history["past_sum"]
-    )
-    history["past_count"] = (
-        history.groupby("team")["past_count"].cumsum() - history["past_count"]
-    )
+    if half_life_days is None:
+        history = history.sort_values(["team", "date"], kind="mergesort")
+        history["past_sum"] = (
+            history.groupby("team")["value"].cumsum() - history["value"]
+        )
+        history["past_count"] = (
+            history.groupby("team")["count"].cumsum() - history["count"]
+        )
+    else:
+        history = _decayed_prior(history, ["team"], half_life_days)
 
     # League mean per team-match row, likewise strictly before each date.
     by_date = (
         long.loc[usable]
         .groupby("date")["own_cards"]
-        .agg(day_sum="sum", day_count="count")
+        .agg(value="sum", count="count")
         .sort_index()
     )
-    past_league_sum = by_date["day_sum"].cumsum() - by_date["day_sum"]
-    past_league_count = by_date["day_count"].cumsum() - by_date["day_count"]
+    if half_life_days is None:
+        past_league_sum = by_date["value"].cumsum() - by_date["value"]
+        past_league_count = by_date["count"].cumsum() - by_date["count"]
+    else:
+        league_rows = by_date.reset_index()
+        # No grouping key: the league is one group. _decayed_prior wants a key,
+        # so give it a constant one rather than special-casing the single group.
+        league_rows["_league"] = 0
+        decayed = _decayed_prior(league_rows, ["_league"], half_life_days).set_index(
+            "date"
+        )
+        past_league_sum = decayed["past_sum"]
+        past_league_count = decayed["past_count"]
     # The first date has no earlier match, so its mean is NaN rather than 0/0:
     # there is genuinely no league average to shrink toward yet.
     league_mean = past_league_sum / past_league_count.replace(0, np.nan)
 
-    merged = long.merge(history, on=["team", "date"], how="left")
+    merged = long.merge(
+        history[["team", "date", "past_sum", "past_count"]],
+        on=["team", "date"],
+        how="left",
+    )
     merged["league_mean"] = merged["date"].map(league_mean)
     # past_count stays NaN for unusable rows, so their rate is NaN too and
     # fit() drops them instead of treating missing data as zero cards.
@@ -205,7 +251,13 @@ def _add_card_features(df: pd.DataFrame, k: float) -> pd.DataFrame:
     return out
 
 
-def add_referee_feature(df: pd.DataFrame, k: float, *, verify: bool = True) -> pd.DataFrame:
+def add_referee_feature(
+    df: pd.DataFrame,
+    k: float,
+    *,
+    half_life_days: float | None = None,
+    verify: bool = True,
+) -> pd.DataFrame:
     """``df`` plus a causal shrunk card rate for the match's referee.
 
     The referee sees the whole match, so the rate is total cards per match
@@ -221,20 +273,30 @@ def add_referee_feature(df: pd.DataFrame, k: float, *, verify: bool = True) -> p
     mean *total* per match, the same quantity being shrunk, so the prior and
     the evidence are on one scale.
 
+    ``half_life_days`` is the same optional recency weight
+    :func:`add_card_features` takes (config parameter
+    ``model.params.half_life_days``): ``None`` keeps the cumulative history,
+    a number of days applies ``0.5 ** (days_before / half_life_days)`` to the
+    referee sums and the league-mean sums. It is deliberately the same value
+    the team rates use — one half-life for the whole feature build.
+
     ``ref_past_count`` (strictly-earlier matches for that referee) is returned
     alongside the rate so reports can count matches officiated by a referee
     with little history — a model's referee column is only as good as the
-    sample behind it.
+    sample behind it. Under recency it is the *effective* (decayed) count, not
+    an integer.
 
     ``verify`` runs the same causality probe as :func:`add_card_features`, on
-    the referee columns.
+    the referee columns, bound to the same ``half_life_days``.
     """
     _positive_float("k", k)
+    if half_life_days is not None:
+        _positive_float("half_life_days", half_life_days)
     _require_columns(df, REFEREE_HISTORY_COLUMNS)
-    features = _add_referee_feature(df, k)
+    features = _add_referee_feature(df, k, half_life_days)
     if verify:
         assert_features_are_causal(
-            _add_referee_feature,
+            lambda frame, weight: _add_referee_feature(frame, weight, half_life_days),
             df,
             k,
             requires=REFEREE_HISTORY_COLUMNS,
@@ -244,7 +306,9 @@ def add_referee_feature(df: pd.DataFrame, k: float, *, verify: bool = True) -> p
     return features
 
 
-def _add_referee_feature(df: pd.DataFrame, k: float) -> pd.DataFrame:
+def _add_referee_feature(
+    df: pd.DataFrame, k: float, half_life_days: float | None = None
+) -> pd.DataFrame:
     """The referee computation itself: no verification, so the probe cannot recurse."""
     out = df.copy()
     hy = pd.to_numeric(out["hy"], errors="coerce")
@@ -276,16 +340,19 @@ def _add_referee_feature(df: pd.DataFrame, k: float) -> pd.DataFrame:
     history = (
         matches.loc[usable]
         .groupby(["referee", "date"], sort=True)["total_cards"]
-        .agg(past_sum="sum", past_count="count")
+        .agg(value="sum", count="count")
         .reset_index()
-        .sort_values(["referee", "date"], kind="mergesort")
     )
-    history["past_sum"] = (
-        history.groupby("referee")["past_sum"].cumsum() - history["past_sum"]
-    )
-    history["past_count"] = (
-        history.groupby("referee")["past_count"].cumsum() - history["past_count"]
-    )
+    if half_life_days is None:
+        history = history.sort_values(["referee", "date"], kind="mergesort")
+        history["past_sum"] = (
+            history.groupby("referee")["value"].cumsum() - history["value"]
+        )
+        history["past_count"] = (
+            history.groupby("referee")["count"].cumsum() - history["count"]
+        )
+    else:
+        history = _decayed_prior(history, ["referee"], half_life_days)
 
     # League mean total per match, strictly before each date. The first date
     # has no earlier match, so its mean is NaN: no league average to shrink
@@ -293,14 +360,27 @@ def _add_referee_feature(df: pd.DataFrame, k: float) -> pd.DataFrame:
     by_date = (
         matches.loc[usable]
         .groupby("date")["total_cards"]
-        .agg(day_sum="sum", day_count="count")
+        .agg(value="sum", count="count")
         .sort_index()
     )
-    past_league_sum = by_date["day_sum"].cumsum() - by_date["day_sum"]
-    past_league_count = by_date["day_count"].cumsum() - by_date["day_count"]
+    if half_life_days is None:
+        past_league_sum = by_date["value"].cumsum() - by_date["value"]
+        past_league_count = by_date["count"].cumsum() - by_date["count"]
+    else:
+        league_rows = by_date.reset_index()
+        league_rows["_league"] = 0
+        decayed = _decayed_prior(league_rows, ["_league"], half_life_days).set_index(
+            "date"
+        )
+        past_league_sum = decayed["past_sum"]
+        past_league_count = decayed["past_count"]
     league_mean_total = past_league_sum / past_league_count.replace(0, np.nan)
 
-    merged = matches.merge(history, on=["referee", "date"], how="left")
+    merged = matches.merge(
+        history[["referee", "date", "past_sum", "past_count"]],
+        on=["referee", "date"],
+        how="left",
+    )
     merged["league_mean_total"] = merged["date"].map(league_mean_total)
     merged["ref_rate"] = (merged["past_sum"] + k * merged["league_mean_total"]) / (
         merged["past_count"] + k
@@ -320,6 +400,57 @@ def _add_referee_feature(df: pd.DataFrame, k: float) -> pd.DataFrame:
         .astype("float64")
     )
     return out
+
+
+def _decayed_prior(
+    aggregated: pd.DataFrame,
+    group_columns: Sequence[str],
+    half_life_days: float,
+) -> pd.DataFrame:
+    """Decayed prior sum/count per aggregated row, strictly before its date.
+
+    ``aggregated`` carries one row per (group..., date) with columns ``value``
+    and ``count`` (that date's summed cards and its number of observations).
+    Returns a copy with ``past_sum``/``past_count``: the sum of ``value`` and
+    ``count`` over rows of the same group dated *strictly earlier*, each
+    weighted ``0.5 ** (days_before / half_life_days)`` — a match one half-life
+    old counts half as much. This is the recency counterpart of the
+    cumulative ``cumsum() - current`` the unweighted path uses.
+
+    WHY the inverse-decay trick: a literal ``0.5 ** (days_before / half_life)``
+    weight would ask for ``0.5 ** (large positive)`` and underflow to zero for
+    an old enough match. Instead each row is scaled by
+    ``r ** -(days since the group's own first date)`` (``r = 0.5 ** (1/h)``),
+    which is bounded by that group's span, prefix-summed, and scaled back by
+    ``r ** +(days since the group's first date)`` — the two factors cancel per
+    pair, so the weight is exactly the requested one and never touches an
+    underflowing exponent.
+
+    The sort is ``mergesort`` not the default: ties (a team playing twice on
+    one date) must keep their input order so the strict ``cumsum - current``
+    excludes the whole same-date group, the calendar-day boundary the rest of
+    the file relies on.
+    """
+    frame = aggregated.sort_values([*group_columns, "date"], kind="mergesort").copy()
+    ratio = 0.5 ** (1.0 / half_life_days)
+    base = frame.groupby(list(group_columns), sort=False)["date"].transform("min")
+    days = (frame["date"] - base).dt.days.to_numpy(dtype=float)
+    inverse = ratio ** (-days)
+    frame["_weighted_value"] = frame["value"].to_numpy(dtype=float) * inverse
+    frame["_weighted_count"] = frame["count"].to_numpy(dtype=float) * inverse
+    grouped = frame.groupby(list(group_columns), sort=False)
+    # shift(1) rather than "cumsum - current": the current row is already
+    # excluded, so perturbing its own counts leaves the prior bit-identical
+    # instead of shifting it by a float-epsilon cancellation (which the
+    # causality probe, comparing exactly, would rightly flag). Each (group,
+    # date) is one row, so shift(1) is exactly "strictly earlier date".
+    keys = [frame[column].to_numpy() for column in group_columns]
+    prior_value = grouped["_weighted_value"].cumsum().groupby(keys).shift(1)
+    prior_count = grouped["_weighted_count"].cumsum().groupby(keys).shift(1)
+    decay = ratio ** days
+    frame["past_sum"] = (decay * prior_value).fillna(0.0)
+    frame["past_count"] = (decay * prior_count).fillna(0.0)
+    return frame.drop(columns=["_weighted_value", "_weighted_count"])
 
 
 def assert_features_are_causal(

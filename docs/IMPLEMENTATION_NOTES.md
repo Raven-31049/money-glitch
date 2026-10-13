@@ -161,6 +161,28 @@ during development is a leak that voids it. This mirrors `AGENTS.md` rule 9 and
 is enforced in `scripts/phase1_step3c_diagnostics.py`, which refuses to load a
 holdout season.
 
+**Cards rate recency (adopted at Phase 1 step 3c).** The Phase 1 card rates are
+time-weighted with an exponential half-life of **365 calendar days**, one value
+applied identically to the team, referee and league-mean sums
+(`add_card_features` / `add_referee_feature`, `half_life_days=365`). It was
+adopted by a pre-registered rule on 1819-2324 only: the last-two-season mean
+|gap| had to at least halve, and walk-forward log loss at lines 3.5/4.5/5.5 had
+to worsen by no more than +0.001, in both datasets. Both held (|gap| halved in
+both; every log-loss delta was negative), so recency replaced the cumulative
+history for the cards model. The feature builders keep `half_life_days=None`
+(cumulative) as their default so the frozen steps 1-3b remain reproducible; the
+adopted cards recipe passes `365`. A second, more invasive fix (walk-forward
+affine recalibration of the expected total) is frozen but **shelved** — see §9.
+
+**Reliability tables are always per-line.** A P(over) reliability table must be
+built from *that line's* probabilities: the diagnostic once reused the single
+line-4.5 walk-forward output for the 3.5 and 5.5 tables, producing identical
+predictions across lines. Since a higher line is strictly harder to clear,
+`scripts/phase1_step3c_diagnostics.py` now rebuilds each line from the captured
+per-side means and asserts both the line-4.5 reconstruction and
+P(over 3.5) > P(over 4.5) > P(over 5.5) on every match. Any future per-line
+reliability readout must do the same.
+
 **Honesty rules in reporting.** No ROI conclusion from fewer than ~100 bets without
 an explicit "sample too small" statement. Every report states the bet count, the
 period, the model and code version, and the config hash.
@@ -252,35 +274,64 @@ Before declaring any phase done:
 
 ## 9. Change log
 
-- Phase 1 step 3c — diagnostics only: extreme predictions, P(over) tails and
-  drift, and the frozen holdout. **No model, feature, k or threshold changed.**
-  Added `AGENTS.md` rule 9 and §5 "Holdout": seasons **2425 and 2526 are the
-  final test set**, and from step 3c onward every decision uses **1819-2324
-  only**. `scripts/phase1_step3c_diagnostics.py` loads only 1819-2324 (a guard
-  refuses a holdout season), builds the incumbent's features, runs one
-  walk-forward of `poisson_team_ref`, and reports: extreme groups (bottom 10% /
-  middle 80% / top 10% of predicted total), the ten-decile gradient, group
-  month-of-season composition, a read-only thin-history diagnostic (prior
-  referee/team match counts, strictly-before-date, mirroring the model's
-  grouping — `models/` does not read it), P(over) reliability at lines
-  3.5/4.5/5.5, and per-season and per-month drift. Findings, in the report's own
-  words, **contradicted the premise**: with the holdout removed the high-P(over)
-  bins are *calibrated*, not over-predicted (line 4.5 bin 0.4-0.5 predicts 0.43
-  vs 0.41 actual; line 5.5 over-predicts, line 3.5 under-predicts — the
-  distribution is mis-shaped, not uniformly hot). The dominant effect is a
-  **rising card rate the cumulative history lags**: league mean total climbs
-  3.30→4.32 cards across the seasons, and the newest season (2324) is
-  under-predicted by +0.53 (`all`) / +0.38 (`no_covid`), largest at the season
-  start (Sep `all` +0.70) and reversing late (Apr -0.15, May -0.14). Thin
-  history is **not** what drives the extremes (rare referees ~11% of both the
-  top and middle, only 2.7% of the `all` bottom; low-history teams 3.5-5%
-  throughout). On `all` the bias is a near-uniform under-prediction (8 of 10
-  deciles under by >0.05); on `no_covid` the top over-predicts and the bottom
-  under-predicts. Two fixes are **proposed and frozen, not implemented**: (A)
-  recency-weighted rate history (one half-life) for the team/referee/league
-  sums, and (B) walk-forward affine recalibration `mu' = a + b*mu` refit
-  strictly per fold — each with a pre-registered pass/fail rule on 1819-2324 in
-  both datasets. All 492 tests pass; nothing in `models/` changed.
+- Phase 1 step 3c — diagnostics, a reliability bug fix, and Fix A adopted.
+  The holdout rule (`AGENTS.md` rule 9, §5) is unchanged: every decision here
+  uses **1819-2324 only** in both datasets.
+  **(1) Reliability bug fix.** An earlier revision of
+  `scripts/phase1_step3c_diagnostics.py` read the P(over) table for *every* line
+  off the single walk-forward run at line 4.5, so lines 3.5/4.5/5.5 showed
+  identical predictions (bins n=351/1258/511/78, pred 0.172/0.250/0.339/0.429) —
+  which is impossible, since a higher line is strictly harder to clear. The
+  earlier "mis-shaped tails" reading was an artifact of that bug and is
+  **withdrawn**. Each line is now rebuilt from the captured per-side means
+  (`probabilities_for_line` + `total_pmf`, step 3b's pattern);
+  `assert_reconstruction` pins the rebuilt line-4.5 pmf to the walk-forward's own
+  output and `assert_line_ordering` pins
+  P(over 3.5) > P(over 4.5) > P(over 5.5) for every match — both raise
+  `AssertionError`, not `assert`, so `-O` cannot disable them. New
+  `tests/test_step3c_diagnostics.py` covers the rebuild, the two guards and
+  `over_reliability`'s per-line signature. Corrected per-line numbers (e.g.
+  `all`): line 3.5 low bin 0.2-0.3 predicts 0.28 vs 0.37 actual, high 0.6-0.7
+  predicts 0.63 vs 0.62; line 4.5 low 0.1-0.2 predicts 0.17 vs 0.19, high
+  0.4-0.5 predicts 0.43 vs 0.41; line 5.5 low 0.0-0.1 predicts 0.08 vs 0.08,
+  high 0.2-0.3 predicts 0.23 vs 0.26. The surviving, reproducible failure is not
+  a uniformly hot tail but **drift**: league mean total climbs 3.30→4.32 across
+  the seasons and the newest season (2324) is under-predicted by +0.53 (`all`) /
+  +0.38 (`no_covid`), largest at the season start (Sep `all` +0.70) and
+  reversing late (Apr/May negative). Thin history is not the driver (rare
+  referees ~11% of the top and middle, 2.7% of the `all` bottom).
+  **(2) Fix A — adopted.** `add_card_features`/`add_referee_feature` gained
+  `half_life_days` (config parameter `model.params.half_life_days`, default
+  `None` = the unchanged cumulative incumbent): each earlier match's contribution
+  to the team, referee and league-mean sums is weighted
+  `0.5 ** (days_before / half_life_days)`. Vectorised with a per-group base date
+  so the inverse-decay factors stay in float range; the prior is a per-group
+  `shift(1)` rather than `cumsum - current`, so a match's own (probe-perturbed)
+  counts cannot move the rows at or before it by a float epsilon the exact
+  causality probe would flag. Evaluated under its frozen rule (half-life fixed
+  at **365 days, no tuning**) on 1819-2324 in both datasets. **Result: PASS —
+  ADOPT recency-weighted history.** Condition (1) last-two-season mean |gap|
+  halves: `all` 0.116 vs 0.370, `no_covid` 0.067 vs 0.202. Condition (2) every
+  line's walk-forward log loss improves: `all` 3.5 −0.0047, 4.5 −0.0060, 5.5
+  −0.0039; `no_covid` −0.0023, −0.0044, −0.0018 — all deltas negative, well
+  inside +0.001. The incumbent-vs-recency drift tables show the recency build
+  tracking the newest season (2324 gap +0.53 → +0.13 `all`, +0.38 → +0.13
+  `no_covid`) without loosening the early seasons. Adopted as the Phase 1 cards
+  recipe (`half_life_days=365`); the library default stays cumulative (`None`)
+  so steps 1-3b's reports, produced under the cumulative recipe, stay
+  reproducible. See the new §5 paragraph.
+  **(3) Fix B — shelved.** Walk-forward affine recalibration `mu' = a + b*mu`
+  (refit strictly per fold) is proposed and frozen with its own pre-registered
+  rule, but **not implemented**; it is recorded here as shelved, pending the
+  corrected per-line tables. `scripts/phase1_step3c_diagnostics.py` now loads
+  only 1819-2324 (a guard refuses a holdout season) and, in one run per dataset,
+  builds the incumbent features, runs `poisson_team_ref`, asserts the rebuild
+  and ordering, then runs the identical recipe on recency-weighted features and
+  reports extreme groups, the decile gradient, group month composition, a
+  read-only thin-history diagnostic, per-line P(over) reliability, per-season
+  and per-month drift for both builds side by side, and Fix A's two conditions
+  with the PASS/FAIL. 7 new tests (3 recency in `tests/test_cards_poisson.py`,
+  4 in `tests/test_step3c_diagnostics.py`); all pass.
 - Phase 1 step 3b — total-target negative binomial and the frozen adoption
   rule. `models/cards_poisson.py` adds `CardsTotalNegativeBinomial`, the one
   new model step 3b was allowed to build: one row per match, target = match
