@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping
 
+import numpy as np
 import pandas as pd
 
 from ..markets.base import Outcome, valid_price
@@ -204,6 +205,72 @@ def select_bets(predictions: pd.DataFrame, ev_threshold: float) -> pd.DataFrame:
     return frame.iloc[positions].reset_index(drop=True)
 
 
+def select_bets_at_percentile(
+    predictions: pd.DataFrame,
+    samples: np.ndarray,
+    ev_threshold: float,
+    percentile: float,
+) -> pd.DataFrame:
+    """As :func:`select_bets`, but each outcome's edge uses its q-th percentile.
+
+    The point-estimate path (`predict` -> :func:`select_bets`) bets on the
+    model's single best guess. This path bet on the *conservative* edge: for
+    every (match, outcome) it takes the q-th percentile of that outcome's own
+    sampled probability and measures ``p_q * raw_odds - 1``. Those percentiles
+    are marginals, taken independently per outcome and never renormalised
+    (invariant 5) — so this is not a probability vector, it is one number per
+    outcome, and that is what makes it a lower bound on the edge rather than a
+    second point estimate.
+
+    ``samples`` is ``(n_draws, n_matches, n_outcomes)`` from a model's
+    ``predict_samples``; its match axis must follow the unique matches of
+    ``predictions`` in order of first appearance, and its outcome axis the
+    unique ``outcome`` labels in the same order. Selection itself is exactly
+    :func:`select_bets` — same strict ``>``, same one-bet-per-(match, market) —
+    so the two paths differ only in the probability basis, and a zero-edge
+    control yields zero bets on both.
+
+    ``percentile`` is a required parameter, not a module constant: which
+    percentile the run bets on is a configuration decision that a report must
+    be able to name, so this function refuses to pick one itself.
+    """
+    if not isinstance(predictions, pd.DataFrame):
+        raise TypeError(
+            f"predictions must be a DataFrame, got {type(predictions).__name__}"
+        )
+    for column in ("match_id", "outcome"):
+        if column not in predictions.columns:
+            raise ValueError(
+                f"predictions is missing column(s) {[column]}; "
+                f"have {list(predictions.columns)}"
+            )
+    frame = predictions.reset_index(drop=True)
+    match_ids = frame["match_id"].drop_duplicates().tolist()
+    outcomes = frame["outcome"].drop_duplicates().tolist()
+
+    # Imported lazily: eval/__init__ pulls in backtest.bankroll (via bootstrap),
+    # so a top-level `from ..eval.uncertainty import ...` here would close an
+    # import cycle the other way round. The import is only needed at call time.
+    from ..eval.uncertainty import percentile_probabilities
+
+    percentiles = percentile_probabilities(samples, percentile, match_ids, outcomes)
+    # The percentile IS the probability basis here, so any probability column the
+    # caller already carried (a point estimate's ``model_prob``) is dropped before
+    # the merge rather than colliding into a duplicate on the rename below.
+    frame = frame.drop(
+        columns=[c for c in ("model_prob", "prob") if c in frame.columns]
+    )
+    frame = frame.merge(percentiles, on=["match_id", "outcome"], how="left", validate="many_to_one")
+    if frame["prob"].isna().any():
+        bad = frame.loc[frame["prob"].isna(), "match_id"].head(3).tolist()
+        raise ValueError(
+            f"no percentile probability for match(es) {bad}; samples must cover "
+            f"every (match_id, outcome) in predictions"
+        )
+    frame = frame.rename(columns={"prob": "model_prob"})
+    return select_bets(frame, ev_threshold)
+
+
 def _number(value: Any, name: str) -> float:
     """Coerce ``value`` to float, or raise ValueError naming ``name``.
 
@@ -217,4 +284,10 @@ def _number(value: Any, name: str) -> float:
         raise ValueError(f"{name} must be a number, got {value!r}") from None
 
 
-__all__ = ["devig", "ev", "kelly_stake", "select_bets"]
+__all__ = [
+    "devig",
+    "ev",
+    "kelly_stake",
+    "select_bets",
+    "select_bets_at_percentile",
+]

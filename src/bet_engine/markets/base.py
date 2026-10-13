@@ -45,6 +45,15 @@ Outcome = str
 #: has one representation across every market and every consumer.
 NAN = float("nan")
 
+#: A settled result that pays nothing either way: the outcome landed exactly on
+#: the line, so the bet is *void* — the stake is returned and no one wins. This
+#: is deliberately a distinct sentinel from ``None`` (which means "no result
+#: yet"): a push is a known result, it just has no winner. Only markets whose
+#: line can sit on an integer return it (a half-line never can). The validation
+#: engine treats it as void — PnL 0, stake returned, excluded from win/loss
+#: calibration — see :mod:`bet_engine.backtest.over_under`.
+PUSH = "push"
+
 #: Which bookmakers an odds policy permits. ``None`` means "every source the
 #: market declares, in the market's declared priority order".
 #:
@@ -318,6 +327,7 @@ __all__ = [
     "NAN",
     "ODDS_POLICIES",
     "POLICY_BOOKMAKERS",
+    "PUSH",
     "BaseMarket",
     "Market",
     "OddsSource",

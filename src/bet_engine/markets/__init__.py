@@ -20,12 +20,17 @@ from .base import (
     sources_for_policy,
     validate_sources,
 )
-from .cards_totals import CardsTotals
+from .cards_totals import CARDS_TOTAL, CardsTotalLine, CardsTotals
 from .match_winner import MATCH_WINNER, MatchWinner
 
-#: Markets a config can name. CardsTotals is deliberately absent: its identity
-#: includes a line, and no config field carries one yet (see cards_totals.py).
-REGISTRY: dict[str, Market] = {MATCH_WINNER.name: MATCH_WINNER}
+#: Markets a config can name. CardsTotals (the frozen fixed-line step-1 market)
+#: is deliberately absent: its identity includes a line no config field carries.
+#: Its Part B successor CARDS_TOTAL reads the line per row from the odds, so it
+#: IS nameable — "cards_total" — and is registered here.
+REGISTRY: dict[str, Market] = {
+    MATCH_WINNER.name: MATCH_WINNER,
+    CARDS_TOTAL.name: CARDS_TOTAL,
+}
 
 
 def get_market(name: str) -> Market:
@@ -43,6 +48,8 @@ __all__ = [
     "ODDS_POLICIES",
     "POLICY_BOOKMAKERS",
     "BaseMarket",
+    "CARDS_TOTAL",
+    "CardsTotalLine",
     "CardsTotals",
     "MATCH_WINNER",
     "Market",

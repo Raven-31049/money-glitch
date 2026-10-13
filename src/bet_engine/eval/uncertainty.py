@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import numpy as np
+import pandas as pd
 
 
 def marginal_percentiles(
@@ -60,4 +61,61 @@ def interval_width(samples: np.ndarray, *, low: float = 10.0, high: float = 90.0
     return bounds[1] - bounds[0]
 
 
-__all__ = ["interval_width", "marginal_percentiles"]
+def percentile_probabilities(
+    samples: np.ndarray,
+    percentile: float,
+    match_ids: Sequence[str],
+    outcomes: Sequence[str],
+) -> pd.DataFrame:
+    """Long-form ``[match_id, outcome, prob]`` at the ``percentile`` of each.
+
+    The table the uncertainty-aware selection reads: for a 2-D-in-outcomes
+    ``samples`` array ``(draws, n_matches, n_outcomes)``, the q-th percentile of
+    each outcome's own draws, laid out one row per (match, outcome). The match
+    axis follows ``samples``; ``outcomes`` labels the last axis in order.
+
+    Each outcome's percentile is read off that outcome's own draws and returned
+    untouched — never renormalised to sum to 1 (invariant 5). Two outcomes can
+    both come out small (an uncertain match); forcing them to 1 would fabricate
+    certainty the draws do not contain.
+    """
+    value = _percentile_value(percentile)
+    array = np.asarray(samples, dtype=float)
+    if array.ndim != 3:
+        raise ValueError(
+            "percentile_probabilities needs samples of shape "
+            f"(draws, n_matches, n_outcomes), got {array.shape}"
+        )
+    ids = list(match_ids)
+    labels = list(outcomes)
+    if len(ids) != array.shape[1]:
+        raise ValueError(
+            f"match_ids has {len(ids)} entries but samples has {array.shape[1]} "
+            f"match(es)"
+        )
+    if len(labels) != array.shape[2]:
+        raise ValueError(
+            f"outcomes has {len(labels)} entries but samples has "
+            f"{array.shape[2]} outcome(s)"
+        )
+    values = marginal_percentiles(array, [value])[0]  # (n_matches, n_outcomes)
+    return pd.DataFrame(
+        {
+            "match_id": np.repeat(np.asarray(ids, dtype=object), len(labels)),
+            "outcome": np.tile(np.asarray(labels, dtype=object), len(ids)),
+            "prob": values.ravel(),
+        }
+    )
+
+
+def _percentile_value(percentile: object) -> float:
+    """A finite percentile in [0, 100], with bools and text refused."""
+    if isinstance(percentile, bool) or not isinstance(percentile, (int, float)):
+        raise ValueError(f"percentile must be a number in [0, 100], got {percentile!r}")
+    value = float(percentile)
+    if not np.isfinite(value) or not 0.0 <= value <= 100.0:
+        raise ValueError(f"percentile must be in [0, 100], got {percentile!r}")
+    return value
+
+
+__all__ = ["interval_width", "marginal_percentiles", "percentile_probabilities"]

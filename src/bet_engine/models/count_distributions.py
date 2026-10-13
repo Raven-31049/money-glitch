@@ -101,6 +101,48 @@ def convolve_rows(left: np.ndarray, right: np.ndarray) -> np.ndarray:
     return outer.reshape(n, length * length) @ _selector(length)
 
 
+#: The three settlement states a cards over/under market can read off a total
+#: pmf, in the order :func:`over_under_push` returns them: over, under, and the
+#: push (exact hit on a whole-number line). A half-line always has a push mass
+#: of exactly 0, so over + under == 1 there; a whole line splits the mass three
+#: ways and the bet on a push is void (markets.base.PUSH).
+OVER_UNDER_PUSH: tuple[str, ...] = ("over", "under", "push")
+
+
+def over_under_push(
+    pmf: np.ndarray, lines: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per-row ``(over, under, push)`` from a match-total pmf and per-row lines.
+
+    ``pmf`` is ``(n_matches, n_counts)`` on the integer counts
+    ``0, 1, ..., n_counts - 1`` and ``lines`` is one threshold per row. ``over``
+    is P(total > line), ``under`` is P(total < line), and ``push`` is
+    P(total == line) — nonzero only when the line is a whole number, where the
+    bet is void. The three always sum to 1 by construction (they partition the
+    pmf), so the caller never has to renormalise (invariant 5 concerns
+    percentiles, but this is exact even so). Vectorised: one broadcast compare
+    per side, no Python loop over rows or cells (invariant 6).
+    """
+    grid = np.asarray(pmf, dtype=float)
+    thresholds = np.asarray(lines, dtype=float)
+    if grid.ndim != 2:
+        raise ValueError(
+            f"pmf must be 2-D (n_matches, n_counts), got shape {grid.shape}"
+        )
+    if thresholds.shape != (grid.shape[0],):
+        raise ValueError(
+            f"lines must have one value per row ({grid.shape[0]}), got "
+            f"shape {thresholds.shape}"
+        )
+    counts = np.arange(grid.shape[1])
+    greater = counts[None, :] > thresholds[:, None]
+    smaller = counts[None, :] < thresholds[:, None]
+    over = (grid * greater).sum(axis=1)
+    under = (grid * smaller).sum(axis=1)
+    push = (grid * ~(greater | smaller)).sum(axis=1)
+    return over, under, push
+
+
 def total_pmf(
     mu_home: np.ndarray,
     mu_away: np.ndarray,
@@ -122,4 +164,11 @@ def total_pmf(
     return counts, convolve_rows(home, away)
 
 
-__all__ = ["SIDE_MAX_COUNT", "convolve_rows", "side_pmf", "total_pmf"]
+__all__ = [
+    "OVER_UNDER_PUSH",
+    "SIDE_MAX_COUNT",
+    "convolve_rows",
+    "over_under_push",
+    "side_pmf",
+    "total_pmf",
+]

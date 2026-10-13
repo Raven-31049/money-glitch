@@ -72,7 +72,9 @@ def test_the_line_must_be_a_finite_positive_number(line):
 
 
 def test_a_line_specific_market_is_not_registered_under_a_generic_name():
-    """Registry keys are market names; this one is identity = name + line, so
-    it joins the registry when the odds source gives a config a line to state."""
+    """Registry keys are market names; the fixed-line step-1 market is identity
+    = name + line, so it never joins the registry. Part B's push-aware
+    CardsTotalLine reads the line per row and IS registered, as "cards_total"."""
     assert "cards_over_3.5" not in REGISTRY
-    assert set(REGISTRY) == {"match_winner"}
+    assert "cards_over_4.5" not in REGISTRY
+    assert set(REGISTRY) == {"match_winner", "cards_total"}

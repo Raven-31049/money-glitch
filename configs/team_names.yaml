@@ -1,0 +1,33 @@
+# Team-name aliases, applied by bet_engine.data.odds.load_odds_table /
+# apply_team_names when an odds feed is joined onto our matches.
+#
+# WHY this file exists: bookmakers spell clubs differently from football-data
+# ("Manchester United" vs "Man United"), and the odds join keys on the team
+# names, so an unmapped spelling is an unmatched match. The join REPORTS every
+# unmatched row rather than dropping it (data/odds.py), so this file is where a
+# mismatch is fixed — never by editing the raw CSVs, which are immutable.
+#
+# `aliases` maps the ODDS FEED'S spelling -> football-data's canonical spelling.
+# Keys must match exactly (after surrounding whitespace is stripped). This is
+# the same corrections pattern as configs/referee_corrections.yaml.
+#
+# It is deliberately a starter set, not exhaustive: extend it as unmatched rows
+# are reported. A wrong alias is worse than a missing one — it merges two real
+# clubs — so each entry names the canonical club it maps onto.
+
+aliases:
+  # --- English Premier League (E0) ---
+  "Manchester United": "Man United"
+  "Manchester City": "Man City"
+  "Newcastle United": "Newcastle"
+  "Nottingham Forest": "Nott'm Forest"
+  "Sheffield United": "Sheffield United"
+  "Tottenham Hotspur": "Tottenham"
+  "West Bromwich Albion": "West Brom"
+  "Wolverhampton Wanderers": "Wolves"
+  "Brighton and Hove Albion": "Brighton"
+  "Brighton & Hove Albion": "Brighton"
+  "West Ham United": "West Ham"
+  "Leeds United": "Leeds"
+  "Queens Park Rangers": "QPR"
+  "Cardiff City": "Cardiff"

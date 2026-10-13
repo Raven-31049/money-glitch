@@ -320,6 +320,58 @@ Before declaring any phase done:
 
 ## 9. Change log
 
+- Phase 1 Part B — the over/under cards pipeline (synthetic odds only). Holdout
+  unchanged (`AGENTS.md` rule 9): no season 2425/2526 is loaded anywhere, and
+  there is still **no real odds adapter** — Part B's chain is proved end to end on
+  synthetic data in tests, `run.py`'s real-season pipeline is not wired to it.
+  **(1) Push-aware market.** `markets/base.py` adds the settlement sentinel
+  `PUSH = "push"` (a known void result, distinct from `None` = "no result yet").
+  `markets/cards_totals.py` adds `CardsTotalLine` (`name="cards_total"`), which
+  reads a **per-row** `line` and prices off `over_odds`/`under_odds`; a whole-
+  number exact hit settles `PUSH`, a half-line never can. The frozen fixed-line
+  `CardsTotals` is untouched, so steps 1-4 stay reproducible; `cards_total` is now
+  the second registry key (`markets/__init__.py`).
+  **(2) Model probabilities at each match's own line.** `count_distributions.py`
+  adds `over_under_push` (vectorised over/under/push from a pmf and per-row
+  lines) and `OVER_UNDER_PUSH`; `cards_poisson.py` adds `over_under(...)` to both
+  card targets (point: long-form `[match_id, line, outcome, prob]`, three states
+  per match; sampled: `(draws, n_matches, 3)`, each draw a full distribution).
+  Percentiles taken from those draws stay marginals, never renormalised
+  (invariant 5).
+  **(3) Uncertainty-aware selection.** `eval/uncertainty.py` adds
+  `percentile_probabilities` (long-form per-outcome percentile). `backtest/staking.py`
+  adds `select_bets_at_percentile(...)`, which replaces the probability basis with
+  the per-outcome q-th percentile and then reuses `select_bets` unchanged (strict
+  `>`, one bet per match/market) — so the pure-market control places **zero bets
+  on both paths**. `percentile` is a caller/config parameter, never a constant.
+  **(4) Void-aware settlement.** `backtest/over_under.py` adds `bet_result` /
+  `bet_pnl` / `settle_bets` / `total_pnl`: a push returns the stake (PnL 0) and is
+  flagged `void` (never `won`), so callers score calibration on `~void` and count
+  pushes instead of fabricating a 0/1. The generic bankroll is left alone
+  (invariant 8).
+  **(5) Odds boundary.** `data/odds.py` defines the canonical schema
+  `(match_id, date, home, away, line, over_odds, under_odds, source, is_closing)`,
+  `normalise_odds` (raises on a half-usable file), `apply_team_names`
+  (`configs/team_names.yaml`, the same corrections-file pattern as
+  `referee_corrections.yaml`; added to `config.py`'s `_NON_VARIANT_FILES`),
+  `load_odds_table`, `select_odds` (closing preferred) and `join_odds` (joins by
+  **date AND team names**, returning an `OddsJoinReport` that lists **every**
+  unmatched odds row and unpriceable match in full — nothing is dropped silently).
+  `models/pure_market.py` gains `devig_long(..., columns=)` and
+  `PureMarket(..., odds_columns=)` plus a deterministic `predict_samples`
+  (zero-uncertainty draws), so the control is expressible on the cards odds
+  columns and on the percentile path.
+  **(6) End-to-end synthetic test.** `tests/test_cards_over_under_e2e.py` draws
+  card totals from a Poisson, prices a book to a fixed overround with one
+  deliberately mispriced subset, and proves: the model bets **exactly** the
+  mispriced subset and profits on it; the no-edge matches would not; a real push
+  occurred and returned the stake; the full-sequence bootstrap separates the
+  known edge from the no-edge (edge `fraction_profitable > 0.95`); the control
+  places zero bets on both paths; and the report groups by line. Tests: 6 e2e,
+  plus `test_cards_over_under.py` (14), `test_cards_total_line.py` (14),
+  `test_over_under_bankroll.py` (14), `test_percentile_selection.py` (11),
+  `test_pure_market_samples.py` (7), `test_odds_join.py` (21); `test_cards_totals.py`'s
+  registry assertion updated to include `cards_total`. Full suite green (635).
 - Phase 1 gate 1 — the calibration check, **PASSED**. Holdout unchanged
   (`AGENTS.md` rule 9): the check runs on **1819-2324 only** in both datasets and
   the script refuses a holdout season by name.

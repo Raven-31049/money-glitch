@@ -226,7 +226,7 @@ def _format_error(error: dict) -> str:
 
 # Files under configs/ that are data corrections, not run variants. They live
 # next to the variants for discoverability but must never be validated as one.
-_NON_VARIANT_FILES = frozenset({"referee_corrections.yaml"})
+_NON_VARIANT_FILES = frozenset({"referee_corrections.yaml", "team_names.yaml"})
 
 
 def variant_config_paths(directory: str | Path) -> list[Path]:

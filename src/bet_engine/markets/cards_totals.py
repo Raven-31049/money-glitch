@@ -25,10 +25,17 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
-from .base import BaseMarket, OddsSource, Outcome, Row, field
+from .base import PUSH, BaseMarket, OddsSource, Outcome, Row, field
 
 #: The four published card counts that make up a match total.
 CARD_COLUMNS: Sequence[str] = ("hy", "ay", "hr", "ar")
+
+#: Where the per-match line and prices live once an odds table has been joined
+#: onto a match frame (data.odds). Kept here — not in the odds module — because
+#: which columns a market prices off is market knowledge (invariant 8).
+LINE_COLUMN = "line"
+OVER_ODDS_COLUMN = "over_odds"
+UNDER_ODDS_COLUMN = "under_odds"
 
 
 class CardsTotals(BaseMarket):
@@ -74,4 +81,81 @@ class CardsTotals(BaseMarket):
         return f"<{type(self).__name__} line={self.line:g}>"
 
 
-__all__ = ["CARD_COLUMNS", "CardsTotals"]
+class CardsTotalLine(BaseMarket):
+    """Over/under a card total at each match's OWN line, push-aware (Part B).
+
+    WHERE this sits next to :class:`CardsTotals`: the frozen step-1 market sets
+    its line at construction and calls an exact hit *under*. Part B's odds data
+    carries a line per quoted over/under, and a whole-number line with an exact
+    hit is a real-world **push** — the stake returns and neither side wins. So
+    this market reads its line from the row and answers three states, while
+    :class:`CardsTotals` is left untouched so steps 1-4 stay reproducible.
+
+    It is the one cards market in the registry (``REGISTRY["cards_total"]``):
+    its identity is no longer a fixed line a config would have to name, so a
+    config can ask for it by name and let the odds table supply the line.
+
+    Prices come from the joined odds columns (``over_odds``/``under_odds``),
+    declared as one source so the odds policy still governs whether a row is
+    priced at all. The book is whatever policy the run chose; the *line* is the
+    row's, not the market's, which is why ``name`` has no number in it.
+    """
+
+    name = "cards_total"
+    outcomes: tuple[Outcome, ...] = ("over", "under")
+    sources: tuple[OddsSource, ...] = (
+        OddsSource(
+            "cards_total",
+            "pinnacle",
+            {"over": OVER_ODDS_COLUMN, "under": UNDER_ODDS_COLUMN},
+        ),
+    )
+
+    def settle(self, row: Row) -> Outcome | None:
+        """``over``, ``under``, ``PUSH`` (void), or None when unsettleable.
+
+        None when the row carries no result: missing card counts *or* no line.
+        A total exactly on a whole-number line is :data:`~.base.PUSH` — not
+        ``under`` — because that is what voids the bet; a half-line never
+        produces one.
+        """
+        counts: list[float] = []
+        for column in CARD_COLUMNS:
+            value = field(row, column)
+            if value is None:
+                return None
+            try:
+                counts.append(float(value))
+            except (TypeError, ValueError):
+                return None
+        line_value = field(row, LINE_COLUMN)
+        if line_value is None:
+            return None
+        try:
+            line = float(line_value)
+        except (TypeError, ValueError):
+            return None
+        if not all(math.isfinite(count) for count in counts) or not math.isfinite(
+            line
+        ):
+            return None
+        total = sum(counts)
+        if total > line:
+            return "over"
+        if total < line:
+            return "under"
+        return PUSH
+
+
+#: The registry instance: one stateless market, line-per-row from the odds.
+CARDS_TOTAL = CardsTotalLine()
+
+__all__ = [
+    "CARD_COLUMNS",
+    "CARDS_TOTAL",
+    "LINE_COLUMN",
+    "OVER_ODDS_COLUMN",
+    "UNDER_ODDS_COLUMN",
+    "CardsTotalLine",
+    "CardsTotals",
+]

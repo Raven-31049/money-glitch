@@ -41,7 +41,9 @@ import pandas as pd
 import statsmodels.api as sm
 from scipy.stats import poisson
 
+from .count_distributions import OVER_UNDER_PUSH as _OVER_UNDER_PUSH
 from .count_distributions import SIDE_MAX_COUNT as _SIDE_MAX_COUNT
+from .count_distributions import over_under_push as _over_under_push
 from .count_distributions import side_pmf as _side_pmf
 from .count_distributions import total_pmf as _convolved_total_pmf
 
@@ -100,6 +102,12 @@ SAMPLE_TEAM_COLUMNS: tuple[str, ...] = (
 #: The market's quoted half-lines; half-lines never sit on an integer, so over
 #: and under partition the pmf exactly.
 SAMPLE_LINES: tuple[float, ...] = (3.5, 4.5, 5.5)
+
+#: The settlement states :meth:`CardsPoisson.over_under` reports, in this order
+#: (Part B). Same tuple as count_distributions.OVER_UNDER_PUSH: over and under
+#: are the two bettable outcomes, push is the void state a whole-number line
+#: can produce.
+OVER_UNDER_PUSH: tuple[str, ...] = _OVER_UNDER_PUSH
 
 #: Default draw count and the fixed seed for :meth:`CardsPoisson.predict_samples`.
 #: A fixed seed makes a report reproducible; the count is the task's default.
@@ -906,6 +914,103 @@ class CardsPoisson:
         by_outcome = {"over": over, "under": 1.0 - over}
         return np.stack([by_outcome[outcome] for outcome in self.outcomes], axis=-1)
 
+    def over_under(
+        self,
+        df: pd.DataFrame,
+        *,
+        line_column: str = "line",
+        draws: int | None = None,
+        seed: int | None = SAMPLE_SEED,
+    ) -> pd.DataFrame | np.ndarray:
+        """Over/under/push at each row's OWN line (Part B).
+
+        ``predict`` quotes one fixed line for every match. The odds data does
+        not: each quoted over/under carries its own threshold, so a match may
+        need P(over)/P(under) at 3.5, at 4.5, or at a whole number like 4 — and
+        at a whole number an exact hit is a *push*, not a win for under. This
+        method reads that per-row line from ``line_column`` and reports all
+        three settlement states.
+
+        Point estimate (``draws is None``): a long-form frame
+        ``[match_id, line, outcome, prob]`` with one row per match per state in
+        :data:`OVER_UNDER_PUSH` (over, under, push). For a whole line the three
+        sum to 1 and ``push`` is nonzero; for a half-line ``push`` is exactly 0
+        and over + under == 1.
+
+        Sampled (``draws`` given): an array ``(draws, len(df), 3)`` in the same
+        outcome order, each draw summing to 1 — the same coefficient and rate
+        uncertainty ``predict_samples`` propagates, just settled at each row's
+        own line. Percentiles taken from these draws are marginals and are never
+        renormalised (invariant 5).
+        """
+        frame = _require_features(df, self.requires_features)
+        lines = _line_values(frame, line_column)
+
+        if draws is None:
+            mu_home = self._mu(_side_rows(frame, "home"))
+            mu_away = self._mu(_side_rows(frame, "away"))
+            _, pmf = _convolved_total_pmf(mu_home, mu_away, self.alpha_)
+            over, under, push = _over_under_push(pmf, lines)
+            return pd.DataFrame(
+                {
+                    "match_id": np.repeat(frame["match_id"].to_numpy(), 3),
+                    "line": np.repeat(lines, 3),
+                    "outcome": np.tile(
+                        np.asarray(_OVER_UNDER_PUSH, dtype=object), len(frame)
+                    ),
+                    "prob": np.column_stack([over, under, push]).ravel(),
+                }
+            )
+
+        self._require_sampling()
+        count = _positive_int("draws", draws)
+        rng = np.random.default_rng(seed)
+        beta = self._coefficient_draws(rng, count)
+        mu_home, mu_away = self._sampled_mus(frame, beta, rng, count)
+        return self._sampled_over_under(mu_home, mu_away, lines, count, frame)
+
+    def _sampled_over_under(
+        self,
+        mu_home: np.ndarray,
+        mu_away: np.ndarray,
+        lines: np.ndarray,
+        draws: int,
+        frame: pd.DataFrame,
+    ) -> np.ndarray:
+        """``(draws, n_matches, 3)`` over/under/push at each row's line.
+
+        Shared by both targets: the side model passes its two per-side means and
+        convolves; the total model overrides it to pass the single total mean
+        through one pmf. Flattened (draw x match) rows are convolved in chunks
+        with a Python loop over chunks but never over a grid cell (invariant 6).
+        """
+        shape = mu_home.shape  # (draws, n_matches)
+        flat_home = mu_home.reshape(-1)
+        flat_away = mu_away.reshape(-1)
+        flat_lines = np.tile(lines, draws)
+        size = flat_home.size
+        over = np.empty(size, dtype=float)
+        under = np.empty(size, dtype=float)
+        push = np.empty(size, dtype=float)
+        for start in range(0, size, _SAMPLE_CHUNK):
+            stop = start + _SAMPLE_CHUNK
+            _, pmf = _convolved_total_pmf(
+                flat_home[start:stop], flat_away[start:stop], self.alpha_
+            )
+            o, u, p = _over_under_push(pmf, flat_lines[start:stop])
+            over[start:stop] = o
+            under[start:stop] = u
+            push[start:stop] = p
+        grid = (draws, shape[1])
+        return np.stack(
+            [over.reshape(grid), under.reshape(grid), push.reshape(grid)], axis=-1
+        )
+
+    def _require_sampling(self) -> None:
+        """Refuse a sampling call before fit, naming the fix."""
+        if self._beta is None or self._cov is None:
+            raise RuntimeError("over_under(draws=...) called before fit()")
+
     def _sample_columns(self) -> tuple[str, ...]:
         """Feature columns :meth:`predict_samples` needs beyond the design's."""
         columns: list[str] = []
@@ -1434,6 +1539,35 @@ class CardsTotalNegativeBinomial(_NegativeBinomialFit, CardsPoisson):
 
         rng = np.random.default_rng(seed)
         beta = self._coefficient_draws(rng, draws)
+        mu_total = self._sampled_total_mu(frame, beta, rng, draws)
+
+        counts = np.arange(2 * _SIDE_MAX_COUNT - 1)
+        flat = mu_total.reshape(-1)
+        over = np.empty((flat.size, len(line_labels)), dtype=float)
+        for start in range(0, flat.size, _SAMPLE_CHUNK):
+            stop = start + _SAMPLE_CHUNK
+            pmf = _side_pmf(flat[start:stop], self.alpha_, counts)
+            for position, line in enumerate(line_labels):
+                over[start:stop, position] = pmf[:, counts > line].sum(axis=1)
+        over = over.reshape(mu_total.shape + (len(line_labels),))
+        by_outcome = {"over": over, "under": 1.0 - over}
+        return np.stack([by_outcome[outcome] for outcome in self.outcomes], axis=-1)
+
+    def _sampled_total_mu(
+        self,
+        frame: pd.DataFrame,
+        beta: np.ndarray,
+        rng: np.random.Generator,
+        draws: int,
+    ) -> np.ndarray:
+        """``(draws, n_matches)`` per-draw expected *total* cards.
+
+        Coefficients from ``N(beta, cov)`` and the three rates from their Gamma
+        posteriors, then ``exp(X beta)`` on the match-level total design. Shared
+        by :meth:`predict_samples` and :meth:`over_under` so both draw from the
+        same posterior in the same order.
+        """
+        assert self._fitted_params is not None
         prior = frame["league_mean"].to_numpy(dtype=float)
         total_prior = frame["league_mean_total"].to_numpy(dtype=float)
         home_rate = self._gamma_rate_draws(
@@ -1451,8 +1585,6 @@ class CardsTotalNegativeBinomial(_NegativeBinomialFit, CardsPoisson):
             frame["ref_past_cards"].to_numpy(dtype=float),
             frame["ref_past_count"].to_numpy(dtype=float), draws,
         )
-
-        assert self._fitted_params is not None
         mu_total = np.zeros((draws, len(frame)))
         for position, term in enumerate(self._fitted_params.index):
             coefficient = beta[:, position][:, None]
@@ -1467,19 +1599,66 @@ class CardsTotalNegativeBinomial(_NegativeBinomialFit, CardsPoisson):
             else:  # pragma: no cover - the design's names are a closed set
                 raise ValueError(f"unexpected design term {term!r} in predict_samples")
             mu_total = mu_total + coefficient * column
-        mu_total = np.exp(mu_total)
+        return np.exp(mu_total)
 
+    def over_under(
+        self,
+        df: pd.DataFrame,
+        *,
+        line_column: str = "line",
+        draws: int | None = None,
+        seed: int | None = SAMPLE_SEED,
+    ) -> pd.DataFrame | np.ndarray:
+        """Per-row-line over/under/push from the single total pmf.
+
+        Same contract as :meth:`CardsPoisson.over_under`, but the total is one
+        negative-binomial count pmf (no convolution) because this model targets
+        the match total directly.
+        """
         counts = np.arange(2 * _SIDE_MAX_COUNT - 1)
+        if draws is None:
+            frame = _require_features(df, self.requires_features)
+            lines = _line_values(frame, line_column)
+            mu_total = self._mu(frame)
+            pmf = _side_pmf(mu_total, self.alpha_, counts)
+            over, under, push = _over_under_push(pmf, lines)
+            return pd.DataFrame(
+                {
+                    "match_id": np.repeat(frame["match_id"].to_numpy(), 3),
+                    "line": np.repeat(lines, 3),
+                    "outcome": np.tile(
+                        np.asarray(_OVER_UNDER_PUSH, dtype=object), len(frame)
+                    ),
+                    "prob": np.column_stack([over, under, push]).ravel(),
+                }
+            )
+
+        self._require_sampling()
+        frame = _require_features(
+            df, (*self.requires_features, *self._sample_columns())
+        )
+        lines = _line_values(frame, line_column)
+        count = _positive_int("draws", draws)
+        rng = np.random.default_rng(seed)
+        beta = self._coefficient_draws(rng, count)
+        mu_total = self._sampled_total_mu(frame, beta, rng, count)
         flat = mu_total.reshape(-1)
-        over = np.empty((flat.size, len(line_labels)), dtype=float)
-        for start in range(0, flat.size, _SAMPLE_CHUNK):
+        flat_lines = np.tile(lines, count)
+        size = flat.size
+        over = np.empty(size, dtype=float)
+        under = np.empty(size, dtype=float)
+        push = np.empty(size, dtype=float)
+        for start in range(0, size, _SAMPLE_CHUNK):
             stop = start + _SAMPLE_CHUNK
             pmf = _side_pmf(flat[start:stop], self.alpha_, counts)
-            for position, line in enumerate(line_labels):
-                over[start:stop, position] = pmf[:, counts > line].sum(axis=1)
-        over = over.reshape(mu_total.shape + (len(line_labels),))
-        by_outcome = {"over": over, "under": 1.0 - over}
-        return np.stack([by_outcome[outcome] for outcome in self.outcomes], axis=-1)
+            o, u, p = _over_under_push(pmf, flat_lines[start:stop])
+            over[start:stop] = o
+            under[start:stop] = u
+            push[start:stop] = p
+        grid = (count, len(frame))
+        return np.stack(
+            [over.reshape(grid), under.reshape(grid), push.reshape(grid)], axis=-1
+        )
 
     def __repr__(self) -> str:
         return (
@@ -1544,6 +1723,30 @@ def _require_features(frame: pd.DataFrame, extra: Sequence[str] = ()) -> pd.Data
     return frame
 
 
+def _line_values(frame: pd.DataFrame, column: str) -> np.ndarray:
+    """Per-row over/under lines, as a finite non-negative float array.
+
+    The line a match settles against comes from the odds data, not the model,
+    so a missing or unusable line is a join/config problem and is named as one
+    rather than silently defaulted. Zero is allowed (a degenerate "over 0" that
+    is always over); negatives and non-finite values are not.
+    """
+    if column not in frame.columns:
+        raise ValueError(
+            f"over_under needs a per-row line column {column!r}; join an odds "
+            f"table that carries it (data.odds.join_odds) before predicting"
+        )
+    values = pd.to_numeric(frame[column], errors="coerce").to_numpy(dtype=float)
+    bad = ~np.isfinite(values) | (values < 0.0)
+    if bad.any():
+        examples = frame.loc[bad, "match_id"].head(3).tolist()
+        raise ValueError(
+            f"over_under got a non-finite or negative line for match(es) "
+            f"{examples}"
+        )
+    return values
+
+
 def _require_columns(df: pd.DataFrame, columns: Sequence[str]) -> None:
     if not isinstance(df, pd.DataFrame):
         raise TypeError(f"expected a DataFrame, got {type(df).__name__}")
@@ -1578,6 +1781,7 @@ __all__ = [
     "CARD_COLUMNS",
     "FEATURE_COLUMNS",
     "HISTORY_COLUMNS",
+    "OVER_UNDER_PUSH",
     "REFEREE_FEATURE_COLUMNS",
     "REFEREE_HISTORY_COLUMNS",
     "SAMPLE_DRAWS",

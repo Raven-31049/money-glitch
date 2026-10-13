@@ -24,7 +24,7 @@ remember.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -35,7 +35,11 @@ _PREDICT_COLUMNS = ("match_id", "outcome", "prob")
 
 
 def devig_long(
-    df: pd.DataFrame, outcomes: Sequence[str], *, value_name: str = "prob"
+    df: pd.DataFrame,
+    outcomes: Sequence[str],
+    *,
+    value_name: str = "prob",
+    columns: Mapping[str, str] | None = None,
 ) -> pd.DataFrame:
     """Proportionally de-vig ``odds_<outcome>`` columns into long form.
 
@@ -44,6 +48,13 @@ def devig_long(
     price vector come back with NaN â€” this function is arithmetic and does
     not decide what "unpriced" means; callers do (``run.py`` filters before
     calling, and :meth:`PureMarket.predict` refuses what reaches it).
+
+    ``columns`` overrides the default ``odds_<outcome>`` naming with an explicit
+    ``{outcome: column}`` map: the cards over/under market prices off
+    ``over_odds``/``under_odds`` (markets/cards_totals.py), so a control bound
+    to that market must say which columns its prices are in. Omitted, the
+    default naming is used, and an outcome missing from a supplied map is an
+    error rather than a silent NaN.
 
     Vectorised over rows: one ``1 / odds`` pass, one row-sum, one division â€”
     no per-row Python (invariant 6). Row-wise results are independent of the
@@ -56,7 +67,19 @@ def devig_long(
     outcome_list = tuple(outcomes)
     if not outcome_list:
         raise ValueError("outcomes must not be empty")
-    odds_columns = [f"odds_{outcome}" for outcome in outcome_list]
+    if columns is None:
+        column_map = {outcome: f"odds_{outcome}" for outcome in outcome_list}
+    else:
+        column_map = {
+            str(outcome): str(column) for outcome, column in columns.items()
+        }
+        missing_outcomes = [o for o in outcome_list if o not in column_map]
+        if missing_outcomes:
+            raise ValueError(
+                f"columns map is missing outcome(s) {missing_outcomes}; "
+                f"have {sorted(column_map)}"
+            )
+    odds_columns = [column_map[outcome] for outcome in outcome_list]
     missing = [column for column in odds_columns if column not in df.columns]
     if missing:
         raise ValueError(
@@ -92,11 +115,28 @@ class PureMarket:
     an edge (invariant 4).
     """
 
-    def __init__(self, outcomes: Sequence[str]) -> None:
+    def __init__(
+        self,
+        outcomes: Sequence[str],
+        *,
+        odds_columns: Mapping[str, str] | None = None,
+    ) -> None:
         outcome_list = tuple(str(outcome) for outcome in outcomes)
         if not outcome_list:
             raise ValueError("outcomes must not be empty")
+        if odds_columns is not None:
+            odds_columns = {
+                str(outcome): str(column)
+                for outcome, column in odds_columns.items()
+            }
+            missing = [o for o in outcome_list if o not in odds_columns]
+            if missing:
+                raise ValueError(
+                    f"odds_columns is missing outcome(s) {missing}; "
+                    f"have {sorted(odds_columns)}"
+                )
         self.outcomes = outcome_list
+        self.odds_columns = odds_columns
 
     def fit(self, train_df: pd.DataFrame) -> PureMarket:
         """Learn nothing; the market is already priced. Returns self."""
@@ -110,7 +150,9 @@ class PureMarket:
         a NaN or a guessed probability here would silently flow into EV,
         calibration and the control's own invariant.
         """
-        long = devig_long(df, self.outcomes, value_name="prob")
+        long = devig_long(
+            df, self.outcomes, value_name="prob", columns=self.odds_columns
+        )
         finite = np.isfinite(long["prob"].to_numpy())
         if not finite.all():
             bad_matches = long.loc[~finite, "match_id"].unique()[:5].tolist()
@@ -120,6 +162,31 @@ class PureMarket:
                 f"skipped them upstream)"
             )
         return long.loc[:, list(_PREDICT_COLUMNS)]
+
+    def predict_samples(
+        self, df: pd.DataFrame, n: int = 1000
+    ) -> np.ndarray:
+        """Zero-uncertainty draws: every draw is the de-vigged probability.
+
+        The control has no parameters to be unsure about, so its whole sampled
+        distribution is a point mass on the de-vigged probability. That makes
+        the two selection paths agree by construction, which is exactly the
+        property invariant 4 needs: the q-th percentile of a constant is that
+        constant for every q, so :func:`bet_engine.backtest.select_bets_at_percentile`
+        places the same (zero) bets the point path does. Return shape follows
+        the sampling contract: ``(n, len(df), n_outcomes)``, ``df`` order on the
+        match axis and ``self.outcomes`` order on the last.
+        """
+        if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+            raise ValueError(f"n must be an integer >= 1, got {n!r}")
+        point = self.predict(df)  # raises on any unpriced row, like predict
+        order = list(self.outcomes)
+        wide = (
+            point.pivot(index="match_id", columns="outcome", values="prob")
+            .reindex(index=df["match_id"].tolist(), columns=order)
+            .to_numpy(dtype=float)
+        )
+        return np.broadcast_to(wide, (n, *wide.shape)).copy()
 
 
 __all__ = ["PureMarket", "devig_long"]
